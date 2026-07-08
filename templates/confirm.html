@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Email Confirmation — Tunefry</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0a0a;
+      color: #f0f0f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #161616;
+      border: 1px solid #2a2a2a;
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      width: 100%;
+      max-width: 420px;
+      text-align: center;
+    }
+    .icon { font-size: 3rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.4rem; margin-bottom: 0.75rem; }
+    p { color: #aaa; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem; }
+    .email { color: #f0f0f0; font-weight: 600; }
+    .btn {
+      display: inline-block;
+      padding: 0.65rem 1.5rem;
+      background: #6366f1;
+      color: #fff;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.95rem;
+      margin: 0.3rem;
+    }
+    .btn:hover { background: #4f46e5; }
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid #333;
+      color: #aaa;
+    }
+    .btn-ghost:hover { background: #1e1e1e; color: #f0f0f0; }
+    .error-box {
+      background: #3b0000;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      font-size: 0.88rem;
+      color: #fca5a5;
+      margin-bottom: 1.5rem;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+
+    {% if state == "success" %}
+      <div class="icon">🎵</div>
+      <h1>You're in!</h1>
+      <p>
+        {% if email %}<span class="email">{{ email }}</span> has been confirmed.<br>{% endif %}
+        Your Tunefry account is active. You can now log in via the API.
+      </p>
+      <a class="btn" href="/docs">Open API Docs</a>
+
+    {% elif state == "error" %}
+      <div class="icon">⚠️</div>
+      <h1>Something went wrong</h1>
+      <div class="error-box">{{ message }}</div>
+      <p>Try signing up again or contact support if this keeps happening.</p>
+      <a class="btn btn-ghost" href="/docs">Back to API Docs</a>
+
+    {% else %}
+      <div class="icon">🔗</div>
+      <h1>Invalid confirmation link</h1>
+      <p>{{ message or "This link has expired or has already been used. Please sign up again to get a fresh confirmation email." }}</p>
+      <a class="btn btn-ghost" href="/docs">Back to API Docs</a>
+    {% endif %}
+
+  </div>
+</body>
+</html>

@@ -103,6 +103,60 @@ async def logout(
 
 
 # ---------------------------------------------------------------------------
+# Email confirmation callback
+# ---------------------------------------------------------------------------
+
+
+@router.get("/confirm", response_class=HTMLResponse)
+async def confirm_email(
+    request: Request,
+    response: Response,
+    token_hash: str | None = Query(default=None),
+    type: str | None = Query(default="signup"),
+    error: str | None = Query(default=None),
+    error_description: str | None = Query(default=None),
+) -> Any:
+    """Handle the email confirmation link from Supabase.
+
+    Supabase calls this URL (via our custom email template) with
+    ?token_hash=...&type=signup so the server can verify the OTP directly
+    without needing client-side JavaScript to parse URL fragments.
+    """
+    if error:
+        return templates.TemplateResponse(
+            "confirm.html",
+            {"request": request, "state": "error", "message": error_description or error},
+        )
+
+    if not token_hash:
+        return templates.TemplateResponse(
+            "confirm.html",
+            {"request": request, "state": "invalid", "message": "No confirmation token found. The link may be malformed."},
+        )
+
+    client = get_supabase()
+    try:
+        result = client.auth.verify_otp({"token_hash": token_hash, "type": type or "signup"})
+    except Exception as exc:
+        return templates.TemplateResponse(
+            "confirm.html",
+            {"request": request, "state": "error", "message": str(exc)},
+        )
+
+    if not result.session:
+        return templates.TemplateResponse(
+            "confirm.html",
+            {"request": request, "state": "invalid", "message": "Confirmation link is invalid or has already been used."},
+        )
+
+    set_session_cookies(response, result.session.access_token, result.session.refresh_token)
+    return templates.TemplateResponse(
+        "confirm.html",
+        {"request": request, "state": "success", "email": result.user.email if result.user else ""},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Protected route (proves JWKS dependency)
 # ---------------------------------------------------------------------------
 
