@@ -112,47 +112,52 @@ async def confirm_email(
     request: Request,
     response: Response,
     token_hash: str | None = Query(default=None),
-    type: str | None = Query(default="signup"),
+    type: str | None = Query(default="email"),
     error: str | None = Query(default=None),
     error_description: str | None = Query(default=None),
 ) -> Any:
     """Handle the email confirmation link from Supabase.
 
     Supabase calls this URL (via our custom email template) with
-    ?token_hash=...&type=signup so the server can verify the OTP directly
+    ?token_hash=...&type=email so the server can verify the OTP directly
     without needing client-side JavaScript to parse URL fragments.
     """
     if error:
         return templates.TemplateResponse(
+            request,
             "confirm.html",
-            {"request": request, "state": "error", "message": error_description or error},
+            {"state": "error", "message": error_description or error},
         )
 
     if not token_hash:
         return templates.TemplateResponse(
+            request,
             "confirm.html",
-            {"request": request, "state": "invalid", "message": "No confirmation token found. The link may be malformed."},
+            {"state": "invalid", "message": "No confirmation token found. The link may be malformed."},
         )
 
     client = get_supabase()
     try:
-        result = client.auth.verify_otp({"token_hash": token_hash, "type": type or "signup"})
+        result = client.auth.verify_otp({"token_hash": token_hash, "type": type or "email"})
     except Exception as exc:
         return templates.TemplateResponse(
+            request,
             "confirm.html",
-            {"request": request, "state": "error", "message": str(exc)},
+            {"state": "error", "message": str(exc)},
         )
 
     if not result.session:
         return templates.TemplateResponse(
+            request,
             "confirm.html",
-            {"request": request, "state": "invalid", "message": "Confirmation link is invalid or has already been used."},
+            {"state": "invalid", "message": "Confirmation link is invalid or has already been used."},
         )
 
     set_session_cookies(response, result.session.access_token, result.session.refresh_token)
     return templates.TemplateResponse(
+        request,
         "confirm.html",
-        {"request": request, "state": "success", "email": result.user.email if result.user else ""},
+        {"state": "success", "email": result.user.email if result.user else ""},
     )
 
 
@@ -203,8 +208,9 @@ async def reset_password_page(
     """
     if error:
         return templates.TemplateResponse(
+            request,
             "reset_password.html",
-            {"request": request, "error": error_description or error, "valid": False},
+            {"error": error_description or error, "valid": False},
         )
 
     client = get_supabase()
@@ -223,19 +229,22 @@ async def reset_password_page(
                 set_session_cookies(response, result.session.access_token, result.session.refresh_token)
     except Exception as exc:
         return templates.TemplateResponse(
+            request,
             "reset_password.html",
-            {"request": request, "error": str(exc), "valid": False},
+            {"error": str(exc), "valid": False},
         )
 
     if not session_token:
         return templates.TemplateResponse(
+            request,
             "reset_password.html",
-            {"request": request, "error": "Reset link is invalid or expired.", "valid": False},
+            {"error": "Reset link is invalid or expired.", "valid": False},
         )
 
     return templates.TemplateResponse(
+        request,
         "reset_password.html",
-        {"request": request, "error": None, "valid": True},
+        {"error": None, "valid": True},
     )
 
 
