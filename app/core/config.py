@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     google_oauth_enabled: bool = False
     oauth_callback_base_url: str = "http://localhost:8000"
 
+    # Dev-only: enables /auth/dev/create-user (pre-confirmed users, bypasses email).
+    # MUST stay false in production.
+    dev_auth_enabled: bool = Field(default=False, validation_alias="DEV_AUTH_ENABLED")
+
     @property
     def jwks_url(self) -> str:
         return f"{self.supabase_url}/auth/v1/.well-known/jwks.json"

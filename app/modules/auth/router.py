@@ -19,7 +19,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.core.config import settings
-from app.core.supabase_client import DictStorage, build_pkce_client, get_supabase
+from app.core.supabase_client import (
+    DictStorage,
+    build_pkce_client,
+    get_service_client,
+    get_supabase,
+)
 from app.modules.auth.cookies import (
     clear_pkce_cookie,
     clear_session_cookies,
@@ -100,6 +105,49 @@ async def logout(
         except Exception:
             pass  # best-effort; cookies are cleared regardless
     clear_session_cookies(response)
+
+
+# ---------------------------------------------------------------------------
+# Dev-only — create a pre-confirmed user (bypasses email). Off by default.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/dev/create-user", status_code=status.HTTP_201_CREATED)
+async def dev_create_user(body: SignUpRequest, response: Response) -> dict[str, Any]:
+    """Create an already-confirmed user via the service-role admin API.
+
+    Enabled only when DEV_AUTH_ENABLED=true. Lets us test signup/login without
+    depending on email delivery. MUST remain disabled in production.
+    """
+    if not settings.dev_auth_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    service = get_service_client()
+    try:
+        service.auth.admin.create_user(
+            {"email": body.email, "password": body.password, "email_confirm": True}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    # Sign in immediately so the caller gets a ready-to-use session.
+    client = get_supabase()
+    try:
+        result = client.auth.sign_in_with_password(
+            {"email": body.email, "password": body.password}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    if not result.session or not result.user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Created but sign-in failed")
+
+    set_session_cookies(response, result.session.access_token, result.session.refresh_token)
+    return {
+        "id": result.user.id,
+        "email": result.user.email,
+        "access_token": result.session.access_token,
+    }
 
 
 # ---------------------------------------------------------------------------

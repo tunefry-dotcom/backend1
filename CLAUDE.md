@@ -79,6 +79,9 @@ templates/
 - `SUPABASE_SERVICE_ROLE_KEY` is server-only — never expose it to a client.
 - Match existing style: type hints, `from __future__ import annotations`, small
   focused modules per bounded context (microservices-ready modular monolith).
+- `POST /auth/dev/create-user` creates a pre-confirmed user via the service-role
+  admin API (bypasses email). Gated by `DEV_AUTH_ENABLED` (default false → 404).
+  For testing only — must stay disabled in production.
 
 ## Env vars
 
