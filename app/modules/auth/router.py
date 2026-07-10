@@ -53,7 +53,13 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
     """Create a new account. Email confirmation may be required before login."""
     client = get_supabase()
     try:
-        result = client.auth.sign_up({"email": body.email, "password": body.password})
+        result = client.auth.sign_up(
+            {
+                "email": body.email,
+                "password": body.password,
+                "options": {"data": {"full_name": body.full_name}},
+            }
+        )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
@@ -64,6 +70,7 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
     return {
         "id": user.id,
         "email": user.email,
+        "full_name": (user.user_metadata or {}).get("full_name"),
         "email_confirmed": user.email_confirmed_at is not None,
         "message": (
             "Account created. Check your email to confirm before logging in."
@@ -125,7 +132,12 @@ async def dev_create_user(body: SignUpRequest, response: Response) -> dict[str, 
     service = get_service_client()
     try:
         service.auth.admin.create_user(
-            {"email": body.email, "password": body.password, "email_confirm": True}
+            {
+                "email": body.email,
+                "password": body.password,
+                "email_confirm": True,
+                "user_metadata": {"full_name": body.full_name},
+            }
         )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -146,6 +158,7 @@ async def dev_create_user(body: SignUpRequest, response: Response) -> dict[str, 
     return {
         "id": result.user.id,
         "email": result.user.email,
+        "full_name": (result.user.user_metadata or {}).get("full_name"),
         "access_token": result.session.access_token,
     }
 
@@ -217,7 +230,12 @@ async def confirm_email(
 @router.get("/me")
 async def me(current_user: Annotated[CurrentUser, Depends(get_current_user)]) -> dict[str, Any]:
     """Return the authenticated user's basic profile."""
-    return {"id": current_user.id, "email": current_user.email, "role": current_user.role}
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+        "role": current_user.role,
+    }
 
 
 # ---------------------------------------------------------------------------

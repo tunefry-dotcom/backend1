@@ -24,12 +24,23 @@ class CurrentUser:
     id: str
     email: Optional[str]
     role: str
+    full_name: Optional[str] = None
 
 
 def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
     if authorization and authorization.lower().startswith("bearer "):
         return authorization[7:]
     return None
+
+
+def _user_from_claims(claims: dict) -> CurrentUser:
+    metadata = claims.get("user_metadata") or {}
+    return CurrentUser(
+        id=claims["sub"],
+        email=claims.get("email"),
+        role=claims.get("role", "authenticated"),
+        full_name=metadata.get("full_name"),
+    )
 
 
 async def get_current_user(
@@ -42,12 +53,7 @@ async def get_current_user(
 
     if token:
         try:
-            claims = decode_token(token)
-            return CurrentUser(
-                id=claims["sub"],
-                email=claims.get("email"),
-                role=claims.get("role", "authenticated"),
-            )
+            return _user_from_claims(decode_token(token))
         except ExpiredSignatureError:
             pass  # fall through to refresh
         except InvalidTokenError:
@@ -62,12 +68,7 @@ async def get_current_user(
                 new_access = result.session.access_token
                 new_refresh = result.session.refresh_token
                 set_session_cookies(response, new_access, new_refresh)
-                claims = decode_token(new_access)
-                return CurrentUser(
-                    id=claims["sub"],
-                    email=claims.get("email"),
-                    role=claims.get("role", "authenticated"),
-                )
+                return _user_from_claims(decode_token(new_access))
         except Exception:
             pass
 
