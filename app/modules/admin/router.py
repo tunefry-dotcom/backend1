@@ -36,10 +36,19 @@ def _fmt(val: Any) -> str | None:
 
 
 def _fetch_all_users(svc: Any) -> list:
-    """Fetch all users via auth.admin.list_users()."""
-    result = svc.auth.admin.list_users()
-    # supabase-py may return a list directly or a paginated wrapper — handle both.
-    return list(result) if result else []
+    """Paginate through auth.admin.list_users() to get every user."""
+    users: list = []
+    page = 1
+    per_page = 1000
+    while True:
+        batch = svc.auth.admin.list_users(page=page, per_page=per_page)
+        if not batch:
+            break
+        users.extend(batch)
+        if len(batch) < per_page:
+            break
+        page += 1
+    return users
 
 
 @router.get("/users", dependencies=[Depends(_require_admin)])
