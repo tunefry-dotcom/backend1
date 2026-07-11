@@ -24,3 +24,9 @@ services:
         sync: false
       - key: GOOGLE_OAUTH_ENABLED
         value: "false"
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: PAYMENT_AMOUNT_DIVISOR
+        sync: false
