@@ -83,8 +83,8 @@ async def list_users(q: str = Query(default="")) -> dict:
         app_meta: dict = getattr(u, "app_metadata", None) or {}
         user_meta: dict = getattr(u, "user_metadata", None) or {}
         full_name: str = user_meta.get("full_name", "") or ""
-        plan: str = app_meta.get("plan", "free") or "free"
         sub = sub_map.get(uid, {})
+        plan: str = sub.get("plan") or app_meta.get("plan", "free") or "free"
 
         users.append(
             {
