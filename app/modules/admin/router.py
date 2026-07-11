@@ -149,8 +149,8 @@ async def list_submissions(
             svc.table("submissions")
             .select("*")
             .in_("submission_type", types)
-            .order("status", ascending=False)   # pending > declined > approved
-            .order("created_at", ascending=False)
+            .order("status", desc=True)          # pending > declined > approved
+            .order("created_at", desc=True)
             .execute()
         )
     except Exception as exc:
