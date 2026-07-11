@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # MUST stay false in production.
     dev_auth_enabled: bool = Field(default=False, validation_alias="DEV_AUTH_ENABLED")
 
+    # Admin panel secret — sent as X-Admin-Secret header. Set a strong value in prod.
+    admin_secret: str = Field(default="", validation_alias="ADMIN_SECRET")
+
     # Razorpay (plan payments). Keys are secrets — set via env only, never commit.
     razorpay_key_id: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
     razorpay_key_secret: str = Field(default="", validation_alias="RAZORPAY_KEY_SECRET")
