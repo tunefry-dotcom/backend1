@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.security import decode_token
 from app.core.supabase_client import get_supabase
 from app.modules.auth.cookies import set_session_cookies
+from app.modules.billing.plans import Plan, plan_from_claims
 
 
 @dataclass
@@ -25,6 +26,7 @@ class CurrentUser:
     email: Optional[str]
     role: str
     full_name: Optional[str] = None
+    plan: Plan = Plan.FREE
 
 
 def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
@@ -40,6 +42,7 @@ def _user_from_claims(claims: dict) -> CurrentUser:
         email=claims.get("email"),
         role=claims.get("role", "authenticated"),
         full_name=metadata.get("full_name"),
+        plan=plan_from_claims(claims),
     )
 
 

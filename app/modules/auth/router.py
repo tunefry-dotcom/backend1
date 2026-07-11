@@ -67,6 +67,10 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Signup failed")
 
+    # Plan assignment is a database invariant: the `handle_new_user` trigger on
+    # auth.users auto-creates a Free subscription row for every new user (all signup
+    # paths — email, OAuth, admin). Nothing to do here.
+
     return {
         "id": user.id,
         "email": user.email,
@@ -235,6 +239,7 @@ async def me(current_user: Annotated[CurrentUser, Depends(get_current_user)]) ->
         "email": current_user.email,
         "full_name": current_user.full_name,
         "role": current_user.role,
+        "plan": current_user.plan.value,
     }
 
 

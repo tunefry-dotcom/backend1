@@ -11,6 +11,8 @@ from fastapi.responses import HTMLResponse
 
 from app.core.config import settings
 from app.modules.auth.router import router as auth_router
+from app.modules.billing.router import router as billing_router
+from app.modules.profile.router import router as profile_router
 
 
 @asynccontextmanager
@@ -38,6 +40,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(auth_router)
+    app.include_router(billing_router)
+    app.include_router(profile_router)
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:

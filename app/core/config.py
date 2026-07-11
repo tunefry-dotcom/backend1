@@ -45,6 +45,19 @@ class Settings(BaseSettings):
     # MUST stay false in production.
     dev_auth_enabled: bool = Field(default=False, validation_alias="DEV_AUTH_ENABLED")
 
+    # Razorpay (plan payments). Keys are secrets — set via env only, never commit.
+    razorpay_key_id: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
+    razorpay_key_secret: str = Field(default="", validation_alias="RAZORPAY_KEY_SECRET")
+    # Divides the charged amount for testing: 100 → charge 1/100th (₹14.39 for a
+    # ₹1439 plan); set to 1 in production to charge the real price.
+    payment_amount_divisor: int = Field(
+        default=100, validation_alias="PAYMENT_AMOUNT_DIVISOR"
+    )
+
+    @property
+    def razorpay_enabled(self) -> bool:
+        return bool(self.razorpay_key_id and self.razorpay_key_secret)
+
     @property
     def jwks_url(self) -> str:
         return f"{self.supabase_url}/auth/v1/.well-known/jwks.json"
