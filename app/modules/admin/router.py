@@ -143,16 +143,14 @@ async def list_submissions(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown category")
 
     svc = get_service_client()
-    offset = (page - 1) * per_page
 
     try:
         resp = (
             svc.table("submissions")
-            .select("*", count="exact")
+            .select("*")
             .in_("submission_type", types)
             .order("status", ascending=False)   # pending > declined > approved
             .order("created_at", ascending=False)
-            .range(offset, offset + per_page - 1)
             .execute()
         )
     except Exception as exc:
@@ -161,10 +159,12 @@ async def list_submissions(
             detail=f"Could not fetch submissions: {exc}",
         ) from exc
 
-    total = resp.count or 0
-    total_pages = max(1, -(-total // per_page))  # ceiling division
+    all_items = resp.data or []
+    total = len(all_items)
+    offset = (page - 1) * per_page
+    total_pages = max(1, -(-total // per_page))
     return {
-        "submissions": resp.data or [],
+        "submissions": all_items[offset: offset + per_page],
         "total": total,
         "page": page,
         "per_page": per_page,
