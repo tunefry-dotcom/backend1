@@ -5,31 +5,33 @@ taken from the client, and the payment signature is verified with the secret key
 before any plan is granted. The order is tagged with ``notes.user_id`` / ``notes.plan``
 so verification can bind the payment to the buyer and the tier they paid for.
 
-``razorpay`` is imported lazily so the app still boots if the package or keys are
-absent — the endpoints fail clearly at call time instead.
+Uses httpx (already in the stack) instead of the razorpay SDK to avoid
+setuptools/pkg_resources issues on python:3.12-slim.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import uuid
 from typing import Any
 
+import httpx
+
 from app.core.config import settings
 from app.modules.billing.plans import Plan, get_spec
+
+_RAZORPAY_BASE = "https://api.razorpay.com/v1"
 
 
 class PaymentError(Exception):
     """Raised for any payment/config/verification failure."""
 
 
-def get_razorpay_client() -> Any:
+def _check_enabled() -> tuple[str, str]:
     if not settings.razorpay_enabled:
         raise PaymentError("Razorpay is not configured (missing key id/secret).")
-    try:
-        import razorpay  # lazy: keeps app import working without the package
-    except ImportError as exc:  # pragma: no cover
-        raise PaymentError(f"razorpay import failed: {exc}") from exc
-    return razorpay.Client(auth=(settings.razorpay_key_id, settings.razorpay_key_secret))
+    return (settings.razorpay_key_id, settings.razorpay_key_secret)
 
 
 def amount_paise(plan: Plan) -> int:
@@ -45,19 +47,26 @@ def amount_paise(plan: Plan) -> int:
 
 def create_order(user_id: str, plan: Plan) -> dict[str, Any]:
     """Create a Razorpay order for ``plan`` and return checkout params."""
-    client = get_razorpay_client()
+    auth = _check_enabled()
     spec = get_spec(plan)
     amount = amount_paise(plan)
 
     try:
-        order = client.order.create(
-            {
+        resp = httpx.post(
+            f"{_RAZORPAY_BASE}/orders",
+            auth=auth,
+            json={
                 "amount": amount,
                 "currency": "INR",
                 "receipt": f"tf_{plan.value}_{uuid.uuid4().hex[:12]}",
                 "notes": {"user_id": user_id, "plan": plan.value},
-            }
+            },
+            timeout=10,
         )
+        resp.raise_for_status()
+        order = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise PaymentError(f"Could not create order: {exc.response.text}") from exc
     except Exception as exc:
         raise PaymentError(f"Could not create order: {exc}") from exc
 
@@ -82,23 +91,31 @@ def verify_payment(
 
     Raises PaymentError on any mismatch; returns None on success.
     """
-    client = get_razorpay_client()
+    auth = _check_enabled()
 
-    try:
-        client.utility.verify_payment_signature(
-            {
-                "razorpay_order_id": razorpay_order_id,
-                "razorpay_payment_id": razorpay_payment_id,
-                "razorpay_signature": razorpay_signature,
-            }
-        )
-    except Exception as exc:
-        raise PaymentError("Payment signature verification failed.") from exc
+    # HMAC-SHA256 of "{order_id}|{payment_id}" with the secret key — same
+    # algorithm the razorpay SDK uses internally.
+    body = f"{razorpay_order_id}|{razorpay_payment_id}"
+    expected = hmac.new(
+        auth[1].encode("utf-8"),
+        body.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, razorpay_signature):
+        raise PaymentError("Payment signature verification failed.")
 
     # Re-fetch the order and confirm it was created for this user + plan. This stops
     # a caller from presenting a valid payment for a cheaper/other order.
     try:
-        order = client.order.fetch(razorpay_order_id)
+        resp = httpx.get(
+            f"{_RAZORPAY_BASE}/orders/{razorpay_order_id}",
+            auth=auth,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        order = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise PaymentError(f"Could not fetch order: {exc.response.text}") from exc
     except Exception as exc:
         raise PaymentError(f"Could not fetch order: {exc}") from exc
 
