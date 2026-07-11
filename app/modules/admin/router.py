@@ -1,14 +1,15 @@
-"""Admin router — internal user management endpoints.
+"""Admin router — internal user management and submission review endpoints.
 
 All routes require X-Admin-Secret header matching settings.admin_secret.
-Uses the service-role client to read auth.users + subscriptions.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.supabase_client import get_service_client
@@ -107,3 +108,100 @@ async def list_users(q: str = Query(default="")) -> dict:
         ]
 
     return {"users": users, "total": len(users)}
+
+
+# ---------------------------------------------------------------------------
+# Submission review
+# ---------------------------------------------------------------------------
+
+_CATEGORY_TYPES: dict[str, list[str]] = {
+    "songs":           ["new_song", "transfer_song"],
+    "albums":          ["new_album", "transfer_album"],
+    "profile-mismatch": ["profile_mismatch"],
+    "claim-removal":   ["claim_removal"],
+    "insta-link":      ["insta_link"],
+}
+
+
+class ReviewBody(BaseModel):
+    status: str        # "approved" | "declined"
+    admin_note: str = ""
+
+
+@router.get("/submissions/{category}", dependencies=[Depends(_require_admin)])
+async def list_submissions(
+    category: str,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """Paginated submissions for a category.
+
+    Sorted: pending first (status DESC: p > d > a), then created_at DESC.
+    """
+    types = _CATEGORY_TYPES.get(category)
+    if not types:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown category")
+
+    svc = get_service_client()
+    offset = (page - 1) * per_page
+
+    try:
+        resp = (
+            svc.table("submissions")
+            .select("*", count="exact")
+            .in_("submission_type", types)
+            .order("status", ascending=False)   # pending > declined > approved
+            .order("created_at", ascending=False)
+            .range(offset, offset + per_page - 1)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch submissions: {exc}",
+        ) from exc
+
+    total = resp.count or 0
+    total_pages = max(1, -(-total // per_page))  # ceiling division
+    return {
+        "submissions": resp.data or [],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    }
+
+
+@router.patch("/submissions/{submission_id}", dependencies=[Depends(_require_admin)])
+async def review_submission(submission_id: str, body: ReviewBody) -> dict:
+    """Approve or decline a submission."""
+    if body.status not in ("approved", "declined"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="status must be 'approved' or 'declined'",
+        )
+
+    svc = get_service_client()
+    try:
+        resp = (
+            svc.table("submissions")
+            .update(
+                {
+                    "status": body.status,
+                    "admin_note": body.admin_note,
+                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq("id", submission_id)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not update submission: {exc}",
+        ) from exc
+
+    if not resp.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Submission not found")
+
+    return resp.data[0]

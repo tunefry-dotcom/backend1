@@ -14,6 +14,7 @@ from app.modules.admin.router import router as admin_router
 from app.modules.auth.router import router as auth_router
 from app.modules.billing.router import router as billing_router
 from app.modules.profile.router import router as profile_router
+from app.modules.submissions.router import router as submissions_router
 
 
 @asynccontextmanager
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(billing_router)
     app.include_router(profile_router)
+    app.include_router(submissions_router)
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:
