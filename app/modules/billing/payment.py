@@ -28,7 +28,7 @@ def get_razorpay_client() -> Any:
     try:
         import razorpay  # lazy: keeps app import working without the package
     except ImportError as exc:  # pragma: no cover
-        raise PaymentError("razorpay package is not installed.") from exc
+        raise PaymentError(f"razorpay import failed: {exc}") from exc
     return razorpay.Client(auth=(settings.razorpay_key_id, settings.razorpay_key_secret))
 
 
