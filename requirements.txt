@@ -10,3 +10,4 @@ python-multipart>=0.0.9
 itsdangerous>=2.2
 razorpay==1.4.2
 requests>=2.31
+setuptools>=69
