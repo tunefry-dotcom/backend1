@@ -37,6 +37,9 @@ class Settings(BaseSettings):
         default="", validation_alias="SUPABASE_JWT_SECRET"
     )
 
+    # Extra CORS origin (e.g. localhost dev while FRONTEND_URL is production)
+    extra_cors_origin: str = Field(default="", validation_alias="EXTRA_CORS_ORIGIN")
+
     # Google OAuth
     google_oauth_enabled: bool = False
     oauth_callback_base_url: str = "http://localhost:8000"

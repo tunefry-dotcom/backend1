@@ -33,9 +33,13 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
+    origins = [settings.frontend_url]
+    if settings.extra_cors_origin:
+        origins.append(settings.extra_cors_origin)
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.frontend_url],
+        allow_origins=origins,
         allow_credentials=True,  # required for cookies
         allow_methods=["*"],
         allow_headers=["*"],
