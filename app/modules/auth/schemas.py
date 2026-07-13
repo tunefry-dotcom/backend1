@@ -3,6 +3,8 @@ from pydantic import BaseModel, EmailStr, field_validator
 
 class SignUpRequest(BaseModel):
     full_name: str
+    artist_name: str
+    phone: str
     email: EmailStr
     password: str
 
@@ -12,6 +14,22 @@ class SignUpRequest(BaseModel):
         v = v.strip()
         if len(v) < 2:
             raise ValueError("Full name must be at least 2 characters")
+        return v
+
+    @field_validator("artist_name")
+    @classmethod
+    def artist_name_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 2:
+            raise ValueError("Artist name must be at least 2 characters")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def phone_not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 7:
+            raise ValueError("Please enter a valid phone number")
         return v
 
     @field_validator("password")

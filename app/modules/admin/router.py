@@ -83,6 +83,8 @@ async def list_users(q: str = Query(default="")) -> dict:
         app_meta: dict = getattr(u, "app_metadata", None) or {}
         user_meta: dict = getattr(u, "user_metadata", None) or {}
         full_name: str = user_meta.get("full_name", "") or ""
+        artist_name: str = user_meta.get("artist_name", "") or ""
+        phone: str = user_meta.get("phone", "") or ""
         sub = sub_map.get(uid, {})
         plan: str = sub.get("plan") or app_meta.get("plan", "free") or "free"
 
@@ -91,6 +93,8 @@ async def list_users(q: str = Query(default="")) -> dict:
                 "id": uid,
                 "email": email,
                 "full_name": full_name,
+                "artist_name": artist_name,
+                "phone": phone,
                 "plan": plan,
                 "plan_name": _PLAN_NAMES.get(plan, plan.replace("_", " ").title()),
                 "status": sub.get("status", "active"),

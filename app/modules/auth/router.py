@@ -57,7 +57,7 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
             {
                 "email": body.email,
                 "password": body.password,
-                "options": {"data": {"full_name": body.full_name}},
+                "options": {"data": {"full_name": body.full_name, "artist_name": body.artist_name, "phone": body.phone}},
             }
         )
     except Exception as exc:
