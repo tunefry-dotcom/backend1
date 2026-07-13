@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.supabase_client import get_service_client
+from app.modules.profile import service as profile_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -208,4 +209,104 @@ async def review_submission(submission_id: str, body: ReviewBody) -> dict:
     if not resp.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Submission not found")
 
-    return resp.data[0]
+    submission = resp.data[0]
+
+    # If approving a new-artist submission, add to the new-artist queue.
+    if body.status == "approved":
+        data: dict = submission.get("data") or {}
+        if str(data.get("new_artist", "")).lower() == "true":
+            main_artists = data.get("main_artists") or []
+            if not main_artists:
+                songs = data.get("songs") or []
+                if songs:
+                    main_artists = songs[0].get("main_artists") or []
+            artist_name = (main_artists[0].get("name", "") if main_artists else "") or ""
+            try:
+                svc.table("new_artist_queue").insert({
+                    "user_email": submission.get("user_email", ""),
+                    "artist_name": artist_name,
+                    "submission_id": submission_id,
+                }).execute()
+            except Exception:
+                pass  # best-effort — don't block the approval
+
+    return submission
+
+
+# ---------------------------------------------------------------------------
+# New-artist queue
+# ---------------------------------------------------------------------------
+
+
+class NewArtistUpdateBody(BaseModel):
+    spotify_url: str = ""
+    apple_music_url: str = ""
+
+
+@router.get("/new-artist-queue", dependencies=[Depends(_require_admin)])
+async def list_new_artist_queue() -> dict:
+    """Return all new-artist queue entries — pending first."""
+    svc = get_service_client()
+    try:
+        resp = (
+            svc.table("new_artist_queue")
+            .select("*")
+            .order("status", desc=False)   # pending before updated
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not fetch queue: {exc}")
+    return {"entries": resp.data or []}
+
+
+@router.patch("/new-artist-queue/{entry_id}", dependencies=[Depends(_require_admin)])
+async def update_new_artist(entry_id: str, body: NewArtistUpdateBody) -> dict:
+    """Save Spotify + Apple Music links for a queued new artist and update their profile."""
+    svc = get_service_client()
+
+    try:
+        entry_resp = svc.table("new_artist_queue").select("*").eq("id", entry_id).limit(1).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"DB error: {exc}")
+    if not entry_resp.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    entry = entry_resp.data[0]
+    user_email = entry.get("user_email", "")
+
+    # Look up user UUID by email so we can update their profile.
+    user_id: str | None = None
+    try:
+        all_users = svc.auth.admin.list_users()
+        match = next((u for u in all_users if getattr(u, "email", "") == user_email), None)
+        if match:
+            user_id = str(match.id)
+    except Exception:
+        pass
+
+    if user_id:
+        try:
+            profile_service.upsert_profile(user_id, {
+                "spotify_url": body.spotify_url,
+                "apple_music_url": body.apple_music_url,
+            })
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Profile update failed: {exc}")
+
+    try:
+        upd = (
+            svc.table("new_artist_queue")
+            .update({
+                "spotify_url": body.spotify_url,
+                "apple_music_url": body.apple_music_url,
+                "status": "updated",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("id", entry_id)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Queue update failed: {exc}")
+
+    return upd.data[0] if upd.data else {}

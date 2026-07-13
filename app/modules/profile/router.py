@@ -26,6 +26,7 @@ def _response(row: Optional[dict[str, Any]]) -> ProfileResponse:
         state=row.get("state"),
         bio=row.get("bio"),
         spotify_url=row.get("spotify_url"),
+        apple_music_url=row.get("apple_music_url"),
         instagram=row.get("instagram"),
         youtube_url=row.get("youtube_url"),
         is_complete=not missing,

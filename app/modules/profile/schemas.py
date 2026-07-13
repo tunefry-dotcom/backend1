@@ -19,6 +19,7 @@ class UpdateProfileRequest(BaseModel):
     state: Optional[str] = None
     bio: Optional[str] = None
     spotify_url: Optional[str] = None
+    apple_music_url: Optional[str] = None
     instagram: Optional[str] = None
     youtube_url: Optional[str] = None
 
@@ -33,6 +34,7 @@ class ProfileResponse(BaseModel):
     state: Optional[str] = None
     bio: Optional[str] = None
     spotify_url: Optional[str] = None
+    apple_music_url: Optional[str] = None
     instagram: Optional[str] = None
     youtube_url: Optional[str] = None
     # Whether the required basic details are filled (gates plan payment).
