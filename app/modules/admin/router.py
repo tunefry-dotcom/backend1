@@ -19,10 +19,26 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 _PLAN_NAMES: dict[str, str] = {
     "free": "Free",
+    "single-song": "Single Song",
     "starter": "Starter",
+    "single-artist": "Single Artist",
+    "double-artist": "Double Artist",
+    "label": "Label",
+    # legacy underscore variants (kept for backwards compat)
+    "single_song": "Single Song",
     "single_artist": "Single Artist",
     "double_artist": "Double Artist",
-    "label": "Label",
+}
+
+_PLAN_PRICES_INR: dict[str, int] = {
+    "single-song": 269,
+    "starter": 899,
+    "single-artist": 1439,
+    "double-artist": 2699,
+    "label": 6300,
+    "single_song": 269,
+    "single_artist": 1439,
+    "double_artist": 2699,
 }
 
 
@@ -313,3 +329,82 @@ async def update_new_artist(entry_id: str, body: NewArtistUpdateBody) -> dict:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Queue update failed: {exc}")
 
     return upd.data[0] if upd.data else {}
+
+
+# ---------------------------------------------------------------------------
+# Plan purchases
+# ---------------------------------------------------------------------------
+
+
+@router.get("/purchases", dependencies=[Depends(_require_admin)])
+async def list_purchases() -> dict:
+    """Return all confirmed (paid) plan purchases with user details.
+
+    Fetches every subscription where plan != 'free', joins with auth user data,
+    and computes total active revenue for the stats panel.
+    """
+    svc = get_service_client()
+    try:
+        subs_resp = (
+            svc.table("subscriptions")
+            .select("*")
+            .neq("plan", "free")
+            .order("started_at", desc=True)
+            .execute()
+        )
+        subs = subs_resp.data or []
+        raw_users = _fetch_all_users(svc)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch purchases: {exc}",
+        ) from exc
+
+    user_map: dict[str, dict] = {}
+    for u in raw_users:
+        uid = str(getattr(u, "id", "") or "")
+        user_meta: dict = getattr(u, "user_metadata", None) or {}
+        user_map[uid] = {
+            "email": getattr(u, "email", "") or "",
+            "full_name": user_meta.get("full_name", "") or "",
+            "artist_name": user_meta.get("artist_name", "") or "",
+        }
+
+    purchases = []
+    plan_counts: dict[str, int] = {}
+    total_revenue = 0
+
+    for sub in subs:
+        uid = sub.get("user_id", "")
+        user = user_map.get(uid, {})
+        plan_key = sub.get("plan") or ""
+        if not plan_key or plan_key == "free":
+            continue
+        plan_name = _PLAN_NAMES.get(plan_key, plan_key.replace("-", " ").replace("_", " ").title())
+        plan_price = _PLAN_PRICES_INR.get(plan_key, 0)
+
+        if sub.get("status") == "active":
+            plan_counts[plan_key] = plan_counts.get(plan_key, 0) + 1
+            total_revenue += plan_price
+
+        purchases.append({
+            "id": sub.get("id"),
+            "user_id": uid,
+            "email": user.get("email", ""),
+            "full_name": user.get("full_name", ""),
+            "artist_name": user.get("artist_name", ""),
+            "plan": plan_key,
+            "plan_name": plan_name,
+            "plan_price_inr": plan_price,
+            "status": sub.get("status", ""),
+            "payment_ref": sub.get("payment_ref"),
+            "started_at": sub.get("started_at"),
+            "expires_at": sub.get("expires_at"),
+        })
+
+    return {
+        "purchases": purchases,
+        "total": len(purchases),
+        "plan_counts": plan_counts,
+        "total_revenue_inr": total_revenue,
+    }
