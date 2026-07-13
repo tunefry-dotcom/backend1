@@ -26,6 +26,8 @@ class CurrentUser:
     email: Optional[str]
     role: str
     full_name: Optional[str] = None
+    artist_name: Optional[str] = None
+    phone: Optional[str] = None
     plan: Plan = Plan.FREE
 
 
@@ -42,6 +44,8 @@ def _user_from_claims(claims: dict) -> CurrentUser:
         email=claims.get("email"),
         role=claims.get("role", "authenticated"),
         full_name=metadata.get("full_name"),
+        artist_name=metadata.get("artist_name"),
+        phone=metadata.get("phone"),
         plan=plan_from_claims(claims),
     )
 

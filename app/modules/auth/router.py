@@ -238,6 +238,8 @@ async def me(current_user: Annotated[CurrentUser, Depends(get_current_user)]) ->
         "id": current_user.id,
         "email": current_user.email,
         "full_name": current_user.full_name,
+        "artist_name": current_user.artist_name,
+        "phone": current_user.phone,
         "role": current_user.role,
         "plan": current_user.plan.value,
     }
