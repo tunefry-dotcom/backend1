@@ -20,6 +20,28 @@ _log = logging.getLogger(__name__)
 router = APIRouter(prefix="/submissions", tags=["submissions"])
 
 
+@router.get("/my")
+async def my_submissions(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> dict:
+    """Return the signed-in user's own submissions, newest first."""
+    try:
+        resp = (
+            get_service_client()
+            .table("submissions")
+            .select("*")
+            .eq("user_email", current_user.email or "")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return {"submissions": resp.data or []}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch submissions: {exc}",
+        ) from exc
+
+
 async def _parse_form(request: Request) -> dict:
     """Parse multipart/form-data into a plain dict.
 
