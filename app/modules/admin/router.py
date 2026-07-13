@@ -256,6 +256,9 @@ async def list_new_artist_queue() -> dict:
             .execute()
         )
     except Exception as exc:
+        # Table may not exist yet — return empty list gracefully instead of 502
+        if "PGRST205" in str(exc) or "schema cache" in str(exc).lower() or "does not exist" in str(exc).lower():
+            return {"entries": [], "hint": "Run migration 0004_apple_music_and_new_artist_queue.sql in Supabase SQL Editor to enable this feature."}
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not fetch queue: {exc}")
     return {"entries": resp.data or []}
 
