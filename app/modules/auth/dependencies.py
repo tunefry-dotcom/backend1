@@ -28,6 +28,7 @@ class CurrentUser:
     full_name: Optional[str] = None
     artist_name: Optional[str] = None
     phone: Optional[str] = None
+    provider: str = "email"
     plan: Plan = Plan.FREE
 
 
@@ -39,6 +40,7 @@ def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
 
 def _user_from_claims(claims: dict) -> CurrentUser:
     metadata = claims.get("user_metadata") or {}
+    app_meta = claims.get("app_metadata") or {}
     return CurrentUser(
         id=claims["sub"],
         email=claims.get("email"),
@@ -46,6 +48,7 @@ def _user_from_claims(claims: dict) -> CurrentUser:
         full_name=metadata.get("full_name"),
         artist_name=metadata.get("artist_name"),
         phone=metadata.get("phone"),
+        provider=app_meta.get("provider", "email"),
         plan=plan_from_claims(claims),
     )
 

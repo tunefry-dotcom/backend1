@@ -184,15 +184,17 @@ async def create_payment_order(
     the user to /profile), and the target must be a real upgrade over the current
     plan. The amount is derived server-side from the plan catalogue.
     """
-    # 1. Profile completeness gate.
-    missing = profile_service.missing_required(
-        profile_service.get_profile(current_user.id)
-    )
-    if missing:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "profile_incomplete", "missing_fields": missing},
+    # 1. Profile completeness gate — only for Google OAuth users.
+    # Email/password users already provided key details at signup.
+    if current_user.provider == "google":
+        missing = profile_service.missing_required(
+            profile_service.get_profile(current_user.id)
         )
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": "profile_incomplete", "missing_fields": missing},
+            )
 
     # 2. Must be a paid upgrade over the current plan.
     if body.plan is Plan.FREE:
