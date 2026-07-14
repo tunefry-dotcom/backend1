@@ -361,7 +361,6 @@ async def forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
 @router.get("/reset-password", response_class=HTMLResponse)
 async def reset_password_page(
     request: Request,
-    response: Response,
     token_hash: str | None = Query(default=None),
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
@@ -383,19 +382,15 @@ async def reset_password_page(
         )
 
     client = get_supabase()
-    session_token: str | None = None
+    session: Any = None
 
     try:
         if token_hash:
             result = client.auth.verify_otp({"token_hash": token_hash, "type": "recovery"})
-            if result.session:
-                session_token = result.session.access_token
-                set_session_cookies(response, result.session.access_token, result.session.refresh_token)
+            session = result.session
         elif code:
             result = client.auth.exchange_code_for_session({"auth_code": code})
-            if result.session:
-                session_token = result.session.access_token
-                set_session_cookies(response, result.session.access_token, result.session.refresh_token)
+            session = result.session
     except Exception as exc:
         return templates.TemplateResponse(
             request,
@@ -403,18 +398,23 @@ async def reset_password_page(
             {**ctx_base, "error": str(exc), "valid": False},
         )
 
-    if not session_token:
+    if not session:
         return templates.TemplateResponse(
             request,
             "reset_password.html",
             {**ctx_base, "error": "Reset link is invalid or expired.", "valid": False},
         )
 
-    return templates.TemplateResponse(
+    # Set cookies on the RETURNED response, not the injected `response` — FastAPI does
+    # not merge the injected Response's headers into a Response object we return. The
+    # temporary recovery session is what authorizes the subsequent POST /reset-password.
+    tmpl = templates.TemplateResponse(
         request,
         "reset_password.html",
         {**ctx_base, "error": None, "valid": True},
     )
+    set_session_cookies(tmpl, session.access_token, session.refresh_token)
+    return tmpl
 
 
 @router.post("/reset-password")
