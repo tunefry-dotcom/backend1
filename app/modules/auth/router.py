@@ -67,6 +67,16 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Signup failed")
 
+    # When email confirmation is ON, Supabase silently returns identities=[] for
+    # an already-registered email instead of raising an error (prevents enumeration).
+    # When email confirmation is OFF, Supabase raises directly — caught by the
+    # except above. This covers the ON case.
+    if user.identities is not None and len(user.identities) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email address already exists. Please sign in instead.",
+        )
+
     # Plan assignment is a database invariant: the `handle_new_user` trigger on
     # auth.users auto-creates a Free subscription row for every new user (all signup
     # paths — email, OAuth, admin). Nothing to do here.
