@@ -14,8 +14,6 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any
 
-import httpx
-
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -49,39 +47,6 @@ _DUPLICATE_EMAIL_MSG = (
 )
 
 
-async def _check_email_not_taken(email: str) -> None:
-    """Async pre-check — raises 400 if the email is already in auth.users.
-
-    Uses httpx.AsyncClient so it never blocks the event loop. GoTrue silently
-    returns identities=[] (or None on newer versions) for duplicate signups
-    when email confirmation is ON, so checking the admin API beforehand is the
-    only version-agnostic approach. Fails open on any error.
-    """
-    email_lower = email.lower()
-    try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.get(
-                f"{settings.supabase_url}/auth/v1/admin/users",
-                headers={
-                    "Authorization": f"Bearer {settings.supabase_service_role_key}",
-                    "apikey": settings.supabase_service_role_key,
-                },
-                params={"filter": email_lower, "per_page": 100},
-            )
-        if resp.status_code == 200:
-            users = resp.json().get("users", [])
-            # GoTrue filter is a substring search — verify exact match.
-            if any(u.get("email", "").lower() == email_lower for u in users):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=_DUPLICATE_EMAIL_MSG,
-                )
-    except HTTPException:
-        raise  # propagate our own 400
-    except Exception:
-        pass  # fail-open: identities check below is the second layer
-
-
 # ---------------------------------------------------------------------------
 # Phase 1 — Email + password
 # ---------------------------------------------------------------------------
@@ -90,7 +55,6 @@ async def _check_email_not_taken(email: str) -> None:
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(body: SignUpRequest) -> dict[str, Any]:
     """Create a new account. Email confirmation may be required before login."""
-    await _check_email_not_taken(body.email)
     client = get_supabase()
     try:
         result = client.auth.sign_up(
@@ -113,14 +77,14 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Signup failed")
 
-    # When email confirmation is ON, Supabase silently returns identities=[] for
-    # an already-registered email instead of raising an error (prevents enumeration).
-    # When email confirmation is OFF, Supabase raises directly — caught by the
-    # except above. This covers the ON case.
-    if user.identities is not None and len(user.identities) == 0:
+    # GoTrue signals a duplicate email signup (when confirmation is ON) by
+    # returning identities=[] in older versions, or identities=None in newer ones.
+    # A real new user always has at least one identity entry (the email provider).
+    # `not user.identities` catches both falsy cases (None and []) in one check.
+    if not user.identities:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="An account with this email address already exists. Please sign in instead.",
+            detail=_DUPLICATE_EMAIL_MSG,
         )
 
     # Plan assignment is a database invariant: the `handle_new_user` trigger on
