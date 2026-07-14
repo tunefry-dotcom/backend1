@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any
 
+import httpx
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -42,6 +44,43 @@ from app.modules.auth.schemas import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 templates = Jinja2Templates(directory="templates")
 
+_DUPLICATE_EMAIL_MSG = (
+    "An account with this email address already exists. Please sign in instead."
+)
+
+
+def _check_email_not_taken(email: str) -> None:
+    """Raise 400 if the email is already registered in auth.users.
+
+    GoTrue silently returns identities=[] (or None in newer versions) for
+    duplicate signups when email confirmation is ON, so the sign_up response
+    alone is unreliable.  One httpx call to the admin users endpoint with a
+    filter is fast (single round-trip) and version-agnostic.
+    """
+    email_lower = email.lower()
+    try:
+        resp = httpx.get(
+            f"{settings.supabase_url}/auth/v1/admin/users",
+            headers={
+                "Authorization": f"Bearer {settings.supabase_service_role_key}",
+                "apikey": settings.supabase_service_role_key,
+            },
+            params={"filter": email_lower, "per_page": 100},
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            users = resp.json().get("users", [])
+            # GoTrue filter is substring-based; confirm exact match ourselves.
+            if any(u.get("email", "").lower() == email_lower for u in users):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=_DUPLICATE_EMAIL_MSG,
+                )
+    except HTTPException:
+        raise  # propagate our own 400 — do not swallow it
+    except Exception:
+        pass  # fail-open: let sign_up surface any remaining error
+
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Email + password
@@ -51,6 +90,7 @@ templates = Jinja2Templates(directory="templates")
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(body: SignUpRequest) -> dict[str, Any]:
     """Create a new account. Email confirmation may be required before login."""
+    _check_email_not_taken(body.email)
     client = get_supabase()
     try:
         result = client.auth.sign_up(
