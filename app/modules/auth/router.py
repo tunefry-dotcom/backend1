@@ -373,11 +373,13 @@ async def reset_password_page(
     - ``token_hash`` (email OTP flow) — verify_otp approach
     - ``code`` (PKCE flow) — exchange_code_for_session approach
     """
+    ctx_base = {"frontend_url": settings.frontend_url}
+
     if error:
         return templates.TemplateResponse(
             request,
             "reset_password.html",
-            {"error": error_description or error, "valid": False},
+            {**ctx_base, "error": error_description or error, "valid": False},
         )
 
     client = get_supabase()
@@ -398,20 +400,20 @@ async def reset_password_page(
         return templates.TemplateResponse(
             request,
             "reset_password.html",
-            {"error": str(exc), "valid": False},
+            {**ctx_base, "error": str(exc), "valid": False},
         )
 
     if not session_token:
         return templates.TemplateResponse(
             request,
             "reset_password.html",
-            {"error": "Reset link is invalid or expired.", "valid": False},
+            {**ctx_base, "error": "Reset link is invalid or expired.", "valid": False},
         )
 
     return templates.TemplateResponse(
         request,
         "reset_password.html",
-        {"error": None, "valid": True},
+        {**ctx_base, "error": None, "valid": True},
     )
 
 
