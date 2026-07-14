@@ -67,10 +67,25 @@ templates/
 - **Token verification = JWKS / ES256**, done locally in `core/security.py` via
   `PyJWKClient` against `{SUPABASE_URL}/auth/v1/.well-known/jwks.json`
   (10-min key cache). No shared HS256 secret unless `SUPABASE_JWT_SECRET` is set.
-- **Email confirmation & password reset** use Supabase's `token_hash` query-param
-  flow (server-readable), NOT the default URL-fragment flow. The Supabase email
-  templates must link to `/auth/confirm?token_hash={{ .TokenHash }}&type=email`
-  and `/auth/reset-password`. Verified server-side with `auth.verify_otp(...)`.
+- **Signup does NOT use `auth.sign_up`.** Supabase's built-in SMTP sender hangs on
+  this project (sign_up blocks 30s+ on the inline SMTP send → `httpx.ReadTimeout` →
+  503). Instead `POST /auth/signup` (1) creates the user unconfirmed via the admin
+  API (`admin.create_user`, no email), (2) generates the confirmation token via
+  `admin.generate_link(type="signup")` (no email), and (3) sends the confirmation
+  email itself through the **Resend HTTP API** (`app/core/email.py`, async httpx).
+  Requires `RESEND_API_KEY` + a Resend-verified `RESEND_FROM_EMAIL`. Duplicate emails
+  are detected from the `admin.create_user` error (`_is_duplicate_email_error`).
+- **Email confirmation** uses Supabase's `token_hash` query-param flow
+  (server-readable). Our confirmation email links to
+  `{OAUTH_CALLBACK_BASE_URL}/auth/confirm?token_hash=<hashed_token>&type=email`;
+  verified server-side with `auth.verify_otp(...)`.
+- **Password reset** still uses `auth.reset_password_for_email` → Supabase's SMTP,
+  which has the same hang problem. TODO: migrate it to the same Resend flow
+  (`admin.generate_link(type="recovery")` + `send_email`).
+- The Supabase auth (GoTrue) client timeout is raised from httpx's 5s default to
+  `SUPABASE_HTTP_TIMEOUT` (30s) in `core/supabase_client._apply_timeout`, and the
+  sync SDK calls in signup/login run via `run_in_threadpool` so they don't block the
+  event loop.
 
 ## Endpoints
 

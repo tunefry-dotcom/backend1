@@ -17,8 +17,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.core.email import confirmation_email_html, send_email
 from app.core.supabase_client import (
     DictStorage,
     build_pkce_client,
@@ -52,55 +54,105 @@ _DUPLICATE_EMAIL_MSG = (
 # ---------------------------------------------------------------------------
 
 
+def _is_duplicate_email_error(msg: str) -> bool:
+    """Detect Supabase's 'email already registered' error across message variants."""
+    m = msg.lower()
+    return (
+        "already been registered" in m
+        or "already registered" in m
+        or "email_exists" in m
+        or ("already" in m and "exist" in m)
+    )
+
+
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(body: SignUpRequest) -> dict[str, Any]:
-    """Create a new account. Email confirmation may be required before login."""
-    client = get_supabase()
+    """Create a new account and send our own confirmation email.
+
+    Supabase's built-in SMTP sender hangs on this project, so we do NOT use
+    ``auth.sign_up`` (which blocks inline on that send). Instead:
+      1. Create the user unconfirmed via the admin API (fast, no email).
+      2. Generate a confirmation token via the admin API (no email).
+      3. Send the confirmation email ourselves through the Resend HTTP API.
+    """
+    service = get_service_client()
+
+    # 1. Create the user (unconfirmed). Duplicate emails error here → clean 400.
     try:
-        result = client.auth.sign_up(
+        created = await run_in_threadpool(
+            service.auth.admin.create_user,
             {
                 "email": body.email,
                 "password": body.password,
-                "options": {"data": {"full_name": body.full_name, "artist_name": body.artist_name, "phone": body.phone}},
-            }
+                "email_confirm": False,
+                "user_metadata": {
+                    "full_name": body.full_name,
+                    "artist_name": body.artist_name,
+                    "phone": body.phone,
+                },
+            },
         )
     except Exception as exc:
         msg = str(exc)
-        if "timed out" in msg.lower() or "timeout" in msg.lower():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Service temporarily unavailable. Please try again in a moment.",
-            )
+        if _is_duplicate_email_error(msg):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_DUPLICATE_EMAIL_MSG)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
 
-    user = result.user
+    user = created.user
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Signup failed")
 
-    # GoTrue signals a duplicate email signup (when confirmation is ON) by
-    # returning identities=[] in older versions, or identities=None in newer ones.
-    # A real new user always has at least one identity entry (the email provider).
-    # `not user.identities` catches both falsy cases (None and []) in one check.
-    if not user.identities:
+    # Plan assignment is a database invariant: the `handle_new_user` trigger on
+    # auth.users auto-creates a Free subscription row for every new user. Nothing here.
+
+    # 2. Generate the confirmation token (no email sent by Supabase).
+    try:
+        link = await run_in_threadpool(
+            service.auth.admin.generate_link,
+            {"type": "signup", "email": body.email, "password": body.password},
+        )
+        token_hash = link.properties.hashed_token
+    except Exception as exc:
+        # Roll back the half-created account so the user can retry cleanly.
+        await run_in_threadpool(service.auth.admin.delete_user, user.id)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_DUPLICATE_EMAIL_MSG,
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not generate confirmation link: {exc}",
         )
 
-    # Plan assignment is a database invariant: the `handle_new_user` trigger on
-    # auth.users auto-creates a Free subscription row for every new user (all signup
-    # paths — email, OAuth, admin). Nothing to do here.
+    confirm_url = f"{settings.confirm_email_url}?token_hash={token_hash}&type=email"
+
+    # 3. Send the confirmation email ourselves via Resend (async, off the SMTP path).
+    if settings.resend_enabled:
+        try:
+            await send_email(
+                to=body.email,
+                subject="Confirm your Tunefry account",
+                html_body=confirmation_email_html(body.full_name, confirm_url),
+            )
+        except Exception as exc:
+            await run_in_threadpool(service.auth.admin.delete_user, user.id)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Account could not be created — confirmation email failed to send: {exc}",
+            )
+    elif not settings.dev_auth_enabled:
+        # Not configured and not a dev box → we'd leave an unconfirmable orphan.
+        # Fail loudly instead of silently creating an account no one can activate.
+        await run_in_threadpool(service.auth.admin.delete_user, user.id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email service is not configured. Please try again later.",
+        )
 
     return {
         "id": user.id,
         "email": user.email,
         "full_name": (user.user_metadata or {}).get("full_name"),
         "email_confirmed": user.email_confirmed_at is not None,
-        "message": (
-            "Account created. Check your email to confirm before logging in."
-            if not user.email_confirmed_at
-            else "Account created."
-        ),
+        "message": "Account created. Check your email to confirm before logging in.",
+        # Dev convenience only: expose the link when Resend isn't configured locally.
+        **({"confirm_url": confirm_url} if not settings.resend_enabled and settings.dev_auth_enabled else {}),
     }
 
 
@@ -109,8 +161,9 @@ async def login(body: LoginRequest, response: Response) -> dict[str, Any]:
     """Authenticate with email and password; sets session cookies."""
     client = get_supabase()
     try:
-        result = client.auth.sign_in_with_password(
-            {"email": body.email, "password": body.password}
+        result = await run_in_threadpool(
+            client.auth.sign_in_with_password,
+            {"email": body.email, "password": body.password},
         )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))

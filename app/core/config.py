@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = Field(
         default="", validation_alias="SUPABASE_JWT_SECRET"
     )
+    # HTTP timeout (seconds) for the Supabase auth (GoTrue) client. The library
+    # defaults to httpx's 5s, which is too tight for a slow project — signup sends
+    # the confirmation email synchronously and routinely exceeds 5s → ReadTimeout.
+    supabase_http_timeout: float = Field(
+        default=30.0, validation_alias="SUPABASE_HTTP_TIMEOUT"
+    )
 
     # Extra CORS origin (e.g. localhost dev while FRONTEND_URL is production)
     extra_cors_origin: str = Field(default="", validation_alias="EXTRA_CORS_ORIGIN")
@@ -69,6 +75,30 @@ class Settings(BaseSettings):
     @property
     def r2_endpoint_url(self) -> str:
         return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
+    # Resend (transactional email). We send confirmation emails ourselves via the
+    # Resend HTTP API to bypass Supabase's built-in SMTP sender, which hangs on this
+    # project (sign_up blocks 30s+ on the SMTP connection). Set RESEND_API_KEY to
+    # enable; the sender domain must be verified in Resend.
+    resend_api_key: str = Field(default="", validation_alias="RESEND_API_KEY")
+    resend_from_email: str = Field(
+        default="noreply@tunefry.com", validation_alias="RESEND_FROM_EMAIL"
+    )
+    resend_from_name: str = Field(default="Tunefry", validation_alias="RESEND_FROM_NAME")
+
+    @property
+    def resend_enabled(self) -> bool:
+        return bool(self.resend_api_key)
+
+    @property
+    def resend_from(self) -> str:
+        """RFC 5322 From header, e.g. ``Tunefry <noreply@tunefry.com>``."""
+        return f"{self.resend_from_name} <{self.resend_from_email}>"
+
+    @property
+    def confirm_email_url(self) -> str:
+        """Backend endpoint the confirmation link points at."""
+        return f"{self.oauth_callback_base_url}/auth/confirm"
 
     # Razorpay (plan payments). Keys are secrets — set via env only, never commit.
     razorpay_key_id: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")

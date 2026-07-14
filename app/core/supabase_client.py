@@ -11,10 +11,25 @@ from __future__ import annotations
 
 from typing import Optional
 
+import httpx
 from supabase import Client, create_client
 from supabase.lib.client_options import ClientOptions
 
 from app.core.config import settings
+
+
+def _apply_timeout(client: Client) -> Client:
+    """Widen the auth (GoTrue) HTTP timeout beyond httpx's 5s default.
+
+    supabase-auth builds its httpx client with no ``timeout`` argument, so it
+    inherits httpx's 5s default. That is too tight for a slow project: ``sign_up``
+    sends the confirmation email synchronously and routinely exceeds 5s, raising
+    ``httpx.ReadTimeout``. ClientOptions exposes no auth-timeout knob and
+    ``create_client`` won't forward an ``http_client``, so we set it directly on the
+    already-constructed auth client.
+    """
+    client.auth._http_client.timeout = httpx.Timeout(settings.supabase_http_timeout)
+    return client
 
 
 class DictStorage:
@@ -43,12 +58,14 @@ class DictStorage:
 
 def get_supabase() -> Client:
     """Anon client for password/OAuth/recovery auth calls."""
-    return create_client(settings.supabase_url, settings.supabase_anon_key)
+    return _apply_timeout(create_client(settings.supabase_url, settings.supabase_anon_key))
 
 
 def get_service_client() -> Client:
     """Service-role client. Never expose this key or client to the browser."""
-    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+    return _apply_timeout(
+        create_client(settings.supabase_url, settings.supabase_service_role_key)
+    )
 
 
 def build_pkce_client(storage: DictStorage) -> Client:
@@ -59,4 +76,6 @@ def build_pkce_client(storage: DictStorage) -> Client:
         auto_refresh_token=False,
         persist_session=True,
     )
-    return create_client(settings.supabase_url, settings.supabase_anon_key, options)
+    return _apply_timeout(
+        create_client(settings.supabase_url, settings.supabase_anon_key, options)
+    )
