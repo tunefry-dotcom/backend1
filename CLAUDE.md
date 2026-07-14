@@ -137,6 +137,12 @@ templates/
 
 - **Starlette ≥1.x** — use `templates.TemplateResponse(request, "name.html", {...})`
   (request FIRST). The old `(name, {"request": ...})` signature is removed → 500.
+- **Cookies + returned Response** — FastAPI does NOT merge the injected `response:
+  Response` parameter's headers into a `Response`/`TemplateResponse`/`RedirectResponse`
+  you `return` yourself. If a handler returns its own response and needs to set
+  cookies, call `set_session_cookies(that_returned_response, ...)` — setting them on
+  the injected `response` silently drops the `Set-Cookie` header. This bit password
+  reset (recovery session cookie was lost → follow-up POST got 401).
 - Supabase OTP `type` for signup confirmation is **`email`** (`signup` is deprecated).
 - Supabase built-in email sender is capped at **2 emails/hour** — use custom SMTP
   (Resend) for anything real. Configured in the Supabase dashboard, not in code.
