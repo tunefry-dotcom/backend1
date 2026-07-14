@@ -88,6 +88,11 @@ async def list_users(q: str = Query(default="")) -> dict:
             .select("user_id,plan,status,expires_at,started_at")
             .execute()
         )
+        profiles_resp = (
+            svc.table("profiles")
+            .select("user_id,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth")
+            .execute()
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -96,6 +101,9 @@ async def list_users(q: str = Query(default="")) -> dict:
 
     sub_map: dict[str, dict] = {
         row["user_id"]: row for row in (subs_resp.data or [])
+    }
+    profile_map: dict[str, dict] = {
+        row["user_id"]: row for row in (profiles_resp.data or [])
     }
 
     users = []
@@ -109,6 +117,7 @@ async def list_users(q: str = Query(default="")) -> dict:
         phone: str = user_meta.get("phone", "") or ""
         sub = sub_map.get(uid, {})
         plan: str = sub.get("plan") or app_meta.get("plan", "free") or "free"
+        prof = profile_map.get(uid, {})
 
         users.append(
             {
@@ -123,6 +132,15 @@ async def list_users(q: str = Query(default="")) -> dict:
                 "expires_at": sub.get("expires_at"),
                 "created_at": _fmt(getattr(u, "created_at", None)),
                 "last_sign_in_at": _fmt(getattr(u, "last_sign_in_at", None)),
+                "spotify_url": prof.get("spotify_url") or "",
+                "apple_music_url": prof.get("apple_music_url") or "",
+                "instagram": prof.get("instagram") or "",
+                "youtube_url": prof.get("youtube_url") or "",
+                "city": prof.get("city") or "",
+                "state": prof.get("state") or "",
+                "bio": prof.get("bio") or "",
+                "gender": prof.get("gender") or "",
+                "date_of_birth": prof.get("date_of_birth") or "",
             }
         )
 
@@ -264,6 +282,21 @@ class NewArtistUpdateBody(BaseModel):
     apple_music_url: str = ""
 
 
+class AdminUserUpdate(BaseModel):
+    full_name: str | None = None
+    artist_name: str | None = None
+    phone: str | None = None
+    city: str | None = None
+    state: str | None = None
+    date_of_birth: str | None = None
+    gender: str | None = None
+    bio: str | None = None
+    spotify_url: str | None = None
+    apple_music_url: str | None = None
+    instagram: str | None = None
+    youtube_url: str | None = None
+
+
 @router.get("/new-artist-queue", dependencies=[Depends(_require_admin)])
 async def list_new_artist_queue() -> dict:
     """Return all new-artist queue entries — pending first."""
@@ -334,6 +367,49 @@ async def update_new_artist(entry_id: str, body: NewArtistUpdateBody) -> dict:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Queue update failed: {exc}")
 
     return upd.data[0] if upd.data else {}
+
+
+# ---------------------------------------------------------------------------
+# User edit / delete
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/users/{user_id}", dependencies=[Depends(_require_admin)])
+async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
+    svc = get_service_client()
+    try:
+        meta = {k: v for k, v in {
+            "full_name": body.full_name,
+            "artist_name": body.artist_name,
+            "phone": body.phone,
+        }.items() if v is not None}
+        if meta:
+            svc.auth.admin.update_user(user_id, {"user_metadata": meta})
+        profile_fields = {
+            k: v for k, v in body.model_dump().items()
+            if k not in ("full_name", "artist_name", "phone") and v is not None
+        }
+        if profile_fields:
+            profile_service.upsert_profile(user_id, profile_fields)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not update user: {exc}",
+        ) from exc
+    return {"updated": True, "user_id": user_id}
+
+
+@router.delete("/users/{user_id}", dependencies=[Depends(_require_admin)])
+async def delete_user_endpoint(user_id: str) -> dict:
+    svc = get_service_client()
+    try:
+        svc.auth.admin.delete_user(user_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not delete user: {exc}",
+        ) from exc
+    return {"deleted": True, "user_id": user_id}
 
 
 # ---------------------------------------------------------------------------
