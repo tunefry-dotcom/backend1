@@ -187,18 +187,20 @@ async def confirm_email(
     ?token_hash=...&type=email so the server can verify the OTP directly
     without needing client-side JavaScript to parse URL fragments.
     """
+    ctx_base = {"frontend_url": settings.frontend_url}
+
     if error:
         return templates.TemplateResponse(
             request,
             "confirm.html",
-            {"state": "error", "message": error_description or error},
+            {**ctx_base, "state": "error", "message": error_description or error},
         )
 
     if not token_hash:
         return templates.TemplateResponse(
             request,
             "confirm.html",
-            {"state": "invalid", "message": "No confirmation token found. The link may be malformed."},
+            {**ctx_base, "state": "invalid", "message": "No confirmation token found. The link may be malformed."},
         )
 
     client = get_supabase()
@@ -208,21 +210,25 @@ async def confirm_email(
         return templates.TemplateResponse(
             request,
             "confirm.html",
-            {"state": "error", "message": str(exc)},
+            {**ctx_base, "state": "error", "message": str(exc)},
         )
 
     if not result.session:
         return templates.TemplateResponse(
             request,
             "confirm.html",
-            {"state": "invalid", "message": "Confirmation link is invalid or has already been used."},
+            {**ctx_base, "state": "invalid", "message": "Confirmation link is invalid or has already been used."},
         )
 
     set_session_cookies(response, result.session.access_token, result.session.refresh_token)
     return templates.TemplateResponse(
         request,
         "confirm.html",
-        {"state": "success", "email": result.user.email if result.user else ""},
+        {
+            "state": "success",
+            "email": result.user.email if result.user else "",
+            "frontend_url": settings.frontend_url,
+        },
     )
 
 
