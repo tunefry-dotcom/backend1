@@ -79,9 +79,11 @@ templates/
   (server-readable). Our confirmation email links to
   `{OAUTH_CALLBACK_BASE_URL}/auth/confirm?token_hash=<hashed_token>&type=email`;
   verified server-side with `auth.verify_otp(...)`.
-- **Password reset** still uses `auth.reset_password_for_email` → Supabase's SMTP,
-  which has the same hang problem. TODO: migrate it to the same Resend flow
-  (`admin.generate_link(type="recovery")` + `send_email`).
+- **Password reset** uses the same Resend flow as signup: `forgot_password` mints the
+  token via `admin.generate_link(type="recovery")` and sends the email through Resend
+  (`password_reset_email_html`). Link points to
+  `{OAUTH_CALLBACK_BASE_URL}/auth/reset-password?token_hash=<hashed_token>&type=recovery`,
+  verified server-side. Failures are swallowed (always 202) to avoid user enumeration.
 - The Supabase auth (GoTrue) client timeout is raised from httpx's 5s default to
   `SUPABASE_HTTP_TIMEOUT` (30s) in `core/supabase_client._apply_timeout`, and the
   sync SDK calls in signup/login run via `run_in_threadpool` so they don't block the
