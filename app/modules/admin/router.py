@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.r2_client import presign_get
 from app.core.supabase_client import get_service_client
 from app.modules.profile import service as profile_service
 
@@ -408,3 +409,28 @@ async def list_purchases() -> dict:
         "plan_counts": plan_counts,
         "total_revenue_inr": total_revenue,
     }
+
+
+# ---------------------------------------------------------------------------
+# Media download (R2 presigned GET)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/media/download-url", dependencies=[Depends(_require_admin)])
+async def get_download_url(key: str = Query(...)) -> dict:
+    """Generate a 15-minute presigned GET URL so the admin can download an R2 file."""
+    if not settings.r2_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="R2 storage not configured.",
+        )
+    if not key.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="key is required.")
+    try:
+        url = presign_get(key.strip(), expires_in=900)
+        return {"url": url, "expires_in": 900}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not generate download URL: {exc}",
+        ) from exc

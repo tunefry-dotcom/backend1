@@ -51,6 +51,25 @@ class Settings(BaseSettings):
     # Admin panel secret — sent as X-Admin-Secret header. Set a strong value in prod.
     admin_secret: str = Field(default="", validation_alias="ADMIN_SECRET")
 
+    # Cloudflare R2 (file storage — S3-compatible). Set all four or storage is disabled.
+    r2_account_id: str = Field(default="", validation_alias="R2_ACCOUNT_ID")
+    r2_access_key_id: str = Field(default="", validation_alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: str = Field(default="", validation_alias="R2_SECRET_ACCESS_KEY")
+    r2_bucket_name: str = Field(default="", validation_alias="R2_BUCKET_NAME")
+
+    @property
+    def r2_enabled(self) -> bool:
+        return bool(
+            self.r2_account_id
+            and self.r2_access_key_id
+            and self.r2_secret_access_key
+            and self.r2_bucket_name
+        )
+
+    @property
+    def r2_endpoint_url(self) -> str:
+        return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
     # Razorpay (plan payments). Keys are secrets — set via env only, never commit.
     razorpay_key_id: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
     razorpay_key_secret: str = Field(default="", validation_alias="RAZORPAY_KEY_SECRET")
