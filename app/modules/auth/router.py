@@ -49,37 +49,37 @@ _DUPLICATE_EMAIL_MSG = (
 )
 
 
-def _check_email_not_taken(email: str) -> None:
-    """Raise 400 if the email is already registered in auth.users.
+async def _check_email_not_taken(email: str) -> None:
+    """Async pre-check — raises 400 if the email is already in auth.users.
 
-    GoTrue silently returns identities=[] (or None in newer versions) for
-    duplicate signups when email confirmation is ON, so the sign_up response
-    alone is unreliable.  One httpx call to the admin users endpoint with a
-    filter is fast (single round-trip) and version-agnostic.
+    Uses httpx.AsyncClient so it never blocks the event loop. GoTrue silently
+    returns identities=[] (or None on newer versions) for duplicate signups
+    when email confirmation is ON, so checking the admin API beforehand is the
+    only version-agnostic approach. Fails open on any error.
     """
     email_lower = email.lower()
     try:
-        resp = httpx.get(
-            f"{settings.supabase_url}/auth/v1/admin/users",
-            headers={
-                "Authorization": f"Bearer {settings.supabase_service_role_key}",
-                "apikey": settings.supabase_service_role_key,
-            },
-            params={"filter": email_lower, "per_page": 100},
-            timeout=5.0,
-        )
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(
+                f"{settings.supabase_url}/auth/v1/admin/users",
+                headers={
+                    "Authorization": f"Bearer {settings.supabase_service_role_key}",
+                    "apikey": settings.supabase_service_role_key,
+                },
+                params={"filter": email_lower, "per_page": 100},
+            )
         if resp.status_code == 200:
             users = resp.json().get("users", [])
-            # GoTrue filter is substring-based; confirm exact match ourselves.
+            # GoTrue filter is a substring search — verify exact match.
             if any(u.get("email", "").lower() == email_lower for u in users):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=_DUPLICATE_EMAIL_MSG,
                 )
     except HTTPException:
-        raise  # propagate our own 400 — do not swallow it
+        raise  # propagate our own 400
     except Exception:
-        pass  # fail-open: let sign_up surface any remaining error
+        pass  # fail-open: identities check below is the second layer
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def _check_email_not_taken(email: str) -> None:
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(body: SignUpRequest) -> dict[str, Any]:
     """Create a new account. Email confirmation may be required before login."""
-    _check_email_not_taken(body.email)
+    await _check_email_not_taken(body.email)
     client = get_supabase()
     try:
         result = client.auth.sign_up(
@@ -101,7 +101,13 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
             }
         )
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        msg = str(exc)
+        if "timed out" in msg.lower() or "timeout" in msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Service temporarily unavailable. Please try again in a moment.",
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
 
     user = result.user
     if not user:
