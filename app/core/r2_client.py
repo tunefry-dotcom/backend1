@@ -95,3 +95,13 @@ def presign_get(key: str, expires_in: int = 900) -> str:
         Params={"Bucket": settings.r2_bucket_name, "Key": key},
         ExpiresIn=expires_in,
     )
+
+
+def upload_bytes(key: str, content: bytes, content_type: str) -> None:
+    """Upload raw bytes directly to R2 (used by the backend submissions handler)."""
+    _get_r2().put_object(
+        Bucket=settings.r2_bucket_name,
+        Key=key,
+        Body=content,
+        ContentType=content_type,
+    )
