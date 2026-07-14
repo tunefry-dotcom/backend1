@@ -7,13 +7,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Annotated, Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
-from app.core.r2_client import presign_get
+from app.core.r2_client import presign_get, upload_bytes
 from app.core.supabase_client import get_service_client
+from app.modules.home import service as home_service
+from app.modules.home.schemas import HomeContent
 from app.modules.profile import service as profile_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -409,6 +413,72 @@ async def list_purchases() -> dict:
         "plan_counts": plan_counts,
         "total_revenue_inr": total_revenue,
     }
+
+
+# ---------------------------------------------------------------------------
+# Home content management
+# ---------------------------------------------------------------------------
+
+_ALLOWED_IMAGE_TYPES: dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+@router.get("/home", dependencies=[Depends(_require_admin)])
+async def admin_get_home() -> HomeContent:
+    try:
+        return home_service.get_home_content()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch home content: {exc}",
+        ) from exc
+
+
+@router.put("/home", dependencies=[Depends(_require_admin)])
+async def admin_update_home(body: HomeContent) -> HomeContent:
+    try:
+        return home_service.upsert_home_content(body)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not save home content: {exc}",
+        ) from exc
+
+
+@router.post("/home/artist-image", dependencies=[Depends(_require_admin)])
+async def upload_artist_image(file: UploadFile = File(...)) -> dict[str, str]:
+    if not settings.r2_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="R2 storage is not configured. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET_NAME.",
+        )
+    if file.content_type not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only JPEG, PNG, or WebP images are allowed.",
+        )
+    data = await file.read()
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File size must not exceed 5 MB.",
+        )
+    ext = _ALLOWED_IMAGE_TYPES[file.content_type]
+    key = f"home/artists/{uuid4().hex}{ext}"
+    content_type = file.content_type
+    try:
+        await run_in_threadpool(upload_bytes, key, data, content_type)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Image upload to R2 failed: {exc}",
+        ) from exc
+    base = settings.oauth_callback_base_url.rstrip("/")
+    return {"url": f"{base}/home/assets/{key}"}
 
 
 # ---------------------------------------------------------------------------
