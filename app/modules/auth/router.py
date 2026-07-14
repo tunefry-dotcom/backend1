@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
-from app.core.email import confirmation_email_html, send_email
+from app.core.email import confirmation_email_html, password_reset_email_html, send_email
 from app.core.supabase_client import (
     DictStorage,
     build_pkce_client,
@@ -332,13 +332,27 @@ async def me(current_user: Annotated[CurrentUser, Depends(get_current_user)]) ->
 
 @router.post("/forgot-password", status_code=status.HTTP_202_ACCEPTED)
 async def forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
-    """Trigger a password-reset email. Always returns 202 to avoid enumeration."""
+    """Trigger a password-reset email. Always returns 202 to avoid enumeration.
+
+    Like signup, this bypasses Supabase's hanging SMTP sender: we mint the recovery
+    token via the admin API and send the email ourselves through Resend. Any failure
+    (unknown email, Resend error) is swallowed so we never reveal whether an account
+    exists.
+    """
     try:
-        client = get_supabase()
-        client.auth.reset_password_for_email(
-            body.email,
-            {"redirect_to": settings.reset_password_url},
+        service = get_service_client()
+        link = await run_in_threadpool(
+            service.auth.admin.generate_link,
+            {"type": "recovery", "email": body.email},
         )
+        token_hash = link.properties.hashed_token
+        reset_url = f"{settings.reset_password_url}?token_hash={token_hash}&type=recovery"
+        if settings.resend_enabled:
+            await send_email(
+                to=body.email,
+                subject="Reset your Tunefry password",
+                html_body=password_reset_email_html(reset_url),
+            )
     except Exception:
         pass  # swallow to avoid user enumeration
     return {"message": "If that email is registered you will receive a reset link shortly."}

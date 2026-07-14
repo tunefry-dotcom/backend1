@@ -70,3 +70,33 @@ def confirmation_email_html(full_name: str | None, confirm_url: str) -> str:
   </div>
 </body>
 </html>"""
+
+
+def password_reset_email_html(reset_url: str) -> str:
+    """Branded HTML for the password-reset email. ``reset_url`` is built server-side."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:0;background:#0a0a0a;font-family:system-ui,-apple-system,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;padding:40px 24px;">
+    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:16px;padding:40px 32px;text-align:center;">
+      <div style="font-size:40px;margin-bottom:12px;">🔑</div>
+      <h1 style="color:#f0f0f0;font-size:22px;margin:0 0 8px;">Reset your password</h1>
+      <p style="color:#aaa;font-size:15px;line-height:1.6;margin:0 0 28px;">
+        We received a request to reset your Tunefry password. Click below to choose a new one.
+      </p>
+      <a href="{reset_url}"
+         style="display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#FF8A50,#F26522);
+                color:#fff;border-radius:8px;text-decoration:none;font-size:15px;font-weight:600;">
+        Reset Password
+      </a>
+      <p style="color:#666;font-size:12px;line-height:1.6;margin:28px 0 0;">
+        If the button doesn't work, paste this link into your browser:<br>
+        <a href="{reset_url}" style="color:#F26522;word-break:break-all;">{reset_url}</a>
+      </p>
+      <p style="color:#555;font-size:12px;margin:20px 0 0;">
+        Didn't request this? You can safely ignore this email — your password won't change.
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
