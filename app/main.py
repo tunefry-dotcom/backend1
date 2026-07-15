@@ -35,9 +35,7 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    origins = [settings.frontend_url]
-    if settings.extra_cors_origin:
-        origins.append(settings.extra_cors_origin)
+    origins = [settings.frontend_url, *settings.extra_cors_origins]
 
     app.add_middleware(
         CORSMiddleware,

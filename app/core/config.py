@@ -43,8 +43,13 @@ class Settings(BaseSettings):
         default=30.0, validation_alias="SUPABASE_HTTP_TIMEOUT"
     )
 
-    # Extra CORS origin (e.g. localhost dev while FRONTEND_URL is production)
+    # Extra CORS origins — comma-separated (e.g. "http://localhost:5173,http://localhost:3000")
     extra_cors_origin: str = Field(default="", validation_alias="EXTRA_CORS_ORIGIN")
+
+    @property
+    def extra_cors_origins(self) -> list[str]:
+        """Parse comma-separated EXTRA_CORS_ORIGIN into a list, stripping blanks."""
+        return [o.strip() for o in self.extra_cors_origin.split(",") if o.strip()]
 
     # Google OAuth
     google_oauth_enabled: bool = False
