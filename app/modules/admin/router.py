@@ -76,6 +76,32 @@ def _fetch_all_users(svc: Any) -> list:
     return users
 
 
+def _fetch_all_rows(svc: Any, table: str, columns: str) -> list:
+    """Paginate through a PostgREST table to bypass the default 1 000-row cap.
+
+    PostgREST returns at most 1 000 rows by default.  With 2 300+ users each
+    having a subscriptions/profiles row, any plain .execute() silently drops
+    the tail — meaning those users always appear as free/blank in the admin
+    panel.  This function pages through with .range() until all rows are in.
+    """
+    rows: list = []
+    page_size = 1000
+    start = 0
+    while True:
+        resp = (
+            svc.table(table)
+            .select(columns)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        batch = resp.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+    return rows
+
+
 @router.get("/users", dependencies=[Depends(_require_admin)])
 async def list_users(q: str = Query(default="")) -> dict:
     """Return all users with their plan and subscription status.
@@ -85,15 +111,12 @@ async def list_users(q: str = Query(default="")) -> dict:
     try:
         svc = get_service_client()
         raw_users = _fetch_all_users(svc)
-        subs_resp = (
-            svc.table("subscriptions")
-            .select("user_id,plan,status,expires_at,started_at")
-            .execute()
+        all_subs = _fetch_all_rows(
+            svc, "subscriptions", "user_id,plan,status,expires_at,started_at"
         )
-        profiles_resp = (
-            svc.table("profiles")
-            .select("user_id,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth")
-            .execute()
+        all_profiles = _fetch_all_rows(
+            svc, "profiles",
+            "user_id,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth",
         )
     except Exception as exc:
         raise HTTPException(
@@ -101,12 +124,8 @@ async def list_users(q: str = Query(default="")) -> dict:
             detail=f"Could not fetch users: {exc}",
         ) from exc
 
-    sub_map: dict[str, dict] = {
-        row["user_id"]: row for row in (subs_resp.data or [])
-    }
-    profile_map: dict[str, dict] = {
-        row["user_id"]: row for row in (profiles_resp.data or [])
-    }
+    sub_map: dict[str, dict] = {row["user_id"]: row for row in all_subs}
+    profile_map: dict[str, dict] = {row["user_id"]: row for row in all_profiles}
 
     users = []
     for u in raw_users:
