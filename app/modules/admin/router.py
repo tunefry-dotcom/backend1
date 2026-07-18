@@ -38,14 +38,14 @@ _PLAN_NAMES: dict[str, str] = {
 }
 
 _PLAN_PRICES_INR: dict[str, int] = {
-    "single-song": 269,
-    "starter": 899,
-    "single-artist": 1439,
-    "double-artist": 2699,
-    "label": 6300,
-    "single_song": 269,
-    "single_artist": 1439,
-    "double_artist": 2699,
+    "single-song": 299,
+    "starter": 999,
+    "single-artist": 1599,
+    "double-artist": 2999,
+    "label": 6999,
+    "single_song": 299,
+    "single_artist": 1599,
+    "double_artist": 2999,
 }
 
 

@@ -121,7 +121,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
     Plan.SINGLE_SONG: PlanSpec(
         plan=Plan.SINGLE_SONG,
         name="Single Song",
-        price_inr=269,
+        price_inr=299,
         royalty_pct=85,
         max_releases=1,
         max_artists=1,
@@ -130,7 +130,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
     Plan.STARTER: PlanSpec(
         plan=Plan.STARTER,
         name="Starter",
-        price_inr=899,
+        price_inr=999,
         royalty_pct=90,
         max_releases=None,
         max_artists=1,
@@ -143,7 +143,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
     Plan.SINGLE_ARTIST: PlanSpec(
         plan=Plan.SINGLE_ARTIST,
         name="Single Artist",
-        price_inr=1439,
+        price_inr=1599,
         royalty_pct=100,
         max_releases=None,
         max_artists=1,
@@ -152,7 +152,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
     Plan.DOUBLE_ARTIST: PlanSpec(
         plan=Plan.DOUBLE_ARTIST,
         name="Double Artist",
-        price_inr=2699,
+        price_inr=2999,
         royalty_pct=100,
         max_releases=None,
         max_artists=2,
@@ -161,7 +161,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
     Plan.LABEL: PlanSpec(
         plan=Plan.LABEL,
         name="Label Plan",
-        price_inr=6300,
+        price_inr=6999,
         royalty_pct=100,
         max_releases=None,
         max_artists=5,
