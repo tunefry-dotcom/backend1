@@ -16,6 +16,8 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.core.r2_client import presign_get, upload_bytes
 from app.core.supabase_client import get_service_client
+from app.modules.billing.plans import Plan, get_spec
+from app.modules.billing.service import assign_plan
 from app.modules.home import service as home_service
 from app.modules.home.schemas import HomeContent
 from app.modules.profile import service as profile_service
@@ -295,6 +297,7 @@ class AdminUserUpdate(BaseModel):
     apple_music_url: str | None = None
     instagram: str | None = None
     youtube_url: str | None = None
+    plan: str | None = None
 
 
 @router.get("/new-artist-queue", dependencies=[Depends(_require_admin)])
@@ -377,7 +380,20 @@ async def update_new_artist(entry_id: str, body: NewArtistUpdateBody) -> dict:
 @router.patch("/users/{user_id}", dependencies=[Depends(_require_admin)])
 async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
     svc = get_service_client()
+    plan_changed: Plan | None = None
     try:
+        # 1. Validate + apply plan change first (before touching profile/meta)
+        if body.plan is not None:
+            try:
+                plan_changed = Plan(body.plan)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid plan '{body.plan}'. Valid values: {[p.value for p in Plan]}",
+                )
+            assign_plan(user_id, plan_changed)
+
+        # 2. Update auth user_metadata (full_name, artist_name, phone)
         meta = {k: v for k, v in {
             "full_name": body.full_name,
             "artist_name": body.artist_name,
@@ -385,18 +401,29 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
         }.items() if v is not None}
         if meta:
             svc.auth.admin.update_user(user_id, {"user_metadata": meta})
+
+        # 3. Upsert profile fields (exclude plan — not a profile column)
         profile_fields = {
             k: v for k, v in body.model_dump().items()
-            if k not in ("full_name", "artist_name", "phone") and v is not None
+            if k not in ("full_name", "artist_name", "phone", "plan") and v is not None
         }
         if profile_fields:
             profile_service.upsert_profile(user_id, profile_fields)
+
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not update user: {exc}",
         ) from exc
-    return {"updated": True, "user_id": user_id}
+
+    result: dict = {"updated": True, "user_id": user_id}
+    if plan_changed is not None:
+        spec = get_spec(plan_changed)
+        result["plan"] = plan_changed.value
+        result["plan_name"] = spec.name
+    return result
 
 
 @router.delete("/users/{user_id}", dependencies=[Depends(_require_admin)])
