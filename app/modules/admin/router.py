@@ -398,14 +398,18 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
             "full_name": body.full_name,
             "artist_name": body.artist_name,
             "phone": body.phone,
-        }.items() if v is not None}
+        }.items() if v is not None and v != ""}
         if meta:
             svc.auth.admin.update_user_by_id(user_id, {"user_metadata": meta})
 
-        # 3. Upsert profile fields (exclude plan — not a profile column)
+        # 3. Upsert profile fields (exclude plan — not a profile column).
+        # Skip None and "" — Postgres date columns reject empty strings,
+        # and we don't want to clear fields the admin left blank.
         profile_fields = {
             k: v for k, v in body.model_dump().items()
-            if k not in ("full_name", "artist_name", "phone", "plan") and v is not None
+            if k not in ("full_name", "artist_name", "phone", "plan")
+            and v is not None
+            and v != ""
         }
         if profile_fields:
             profile_service.upsert_profile(user_id, profile_fields)
