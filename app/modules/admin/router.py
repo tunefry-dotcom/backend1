@@ -400,7 +400,7 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
             "phone": body.phone,
         }.items() if v is not None}
         if meta:
-            svc.auth.admin.update_user(user_id, {"user_metadata": meta})
+            svc.auth.admin.update_user_by_id(user_id, {"user_metadata": meta})
 
         # 3. Upsert profile fields (exclude plan — not a profile column)
         profile_fields = {
