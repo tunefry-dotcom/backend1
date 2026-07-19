@@ -38,6 +38,7 @@ class MyPlanResponse(BaseModel):
     status: Optional[str] = None
     expires_at: Optional[str] = None
     days_remaining: Optional[int] = None
+    plan_confirmed: bool = False
 
 
 class ChangePlanRequest(BaseModel):

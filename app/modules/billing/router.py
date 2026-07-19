@@ -91,6 +91,7 @@ def _my_plan_response(
         status=life["status"],
         expires_at=life["expires_at"],
         days_remaining=life["days_remaining"],
+        plan_confirmed=row.get("plan_confirmed", False) if row else False,
     )
 
 
@@ -117,6 +118,23 @@ async def my_plan(
     row = get_subscription(current_user.id)
     plan = effective_plan(row) if row else current_user.plan
     return _my_plan_response(plan, row)
+
+
+@router.post("/select-free", response_model=MyPlanResponse)
+async def select_free_plan(
+    response: Response,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    refresh_token: str | None = Cookie(default=None, alias=settings.refresh_cookie_name),
+) -> MyPlanResponse:
+    """Explicitly activate the Free plan and mark the user's plan selection as confirmed.
+
+    Called when a new user clicks "Choose Plan" on the free tier in /your-plan.
+    The DB trigger auto-assigns free but leaves plan_confirmed=false; this endpoint
+    flips it true so PlanGate lets them through to upload pages.
+    """
+    row = assign_plan(current_user.id, Plan.FREE)
+    _refresh_session(response, refresh_token)
+    return _my_plan_response(Plan.FREE, row)
 
 
 @router.post("/change-plan", response_model=MyPlanResponse)

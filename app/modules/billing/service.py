@@ -123,6 +123,7 @@ def assign_plan(
         "started_at": now.isoformat(),
         "expires_at": None if is_free else (now + timedelta(days=_PLAN_TERM_DAYS)).isoformat(),
         "payment_ref": payment_ref,
+        "plan_confirmed": True,
     }
 
     service = get_service_client()
