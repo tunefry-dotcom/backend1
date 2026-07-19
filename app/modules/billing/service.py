@@ -127,10 +127,11 @@ def assign_plan(
     }
 
     service = get_service_client()
-    res = (
-        service.table(_TABLE)
-        .upsert(record, on_conflict="user_id")
-        .execute()
-    )
+    try:
+        res = service.table(_TABLE).upsert(record, on_conflict="user_id").execute()
+    except Exception:
+        # plan_confirmed column may not exist yet (migration pending); retry without it
+        record_fb = {k: v for k, v in record.items() if k != "plan_confirmed"}
+        res = service.table(_TABLE).upsert(record_fb, on_conflict="user_id").execute()
     rows = res.data or []
     return rows[0] if rows else record
