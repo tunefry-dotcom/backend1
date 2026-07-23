@@ -23,6 +23,10 @@ env/
 .coverage
 htmlcov/
 
+# Migration output (contain PII — never commit)
+migration/results*.csv
+migration/run.log
+
 # IDE / OS
 .idea/
 .vscode/
