@@ -41,7 +41,7 @@ async def my_submissions(
             get_service_client()
             .table("submissions")
             .select("*")
-            .eq("user_email", current_user.email or "")
+            .eq("user_email", (current_user.email or "").lower())
             .order("created_at", desc=True)
             .execute()
         )
@@ -166,7 +166,7 @@ def _save(user: CurrentUser, submission_type: str, data: dict) -> None:
     try:
         get_service_client().table("submissions").insert(
             {
-                "user_email": user.email or "",
+                "user_email": (user.email or "").lower(),
                 "user_plan": user.plan.value,
                 "submission_type": submission_type,
                 "data": data,
