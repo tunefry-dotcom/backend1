@@ -21,6 +21,7 @@ def _set(response: Response, name: str, value: str, max_age: int) -> None:
         secure=settings.cookie_secure,
         samesite=settings.cookie_samesite,
         path="/",
+        domain=settings.cookie_domain or None,
     )
 
 
@@ -30,8 +31,8 @@ def set_session_cookies(response: Response, access_token: str, refresh_token: st
 
 
 def clear_session_cookies(response: Response) -> None:
-    response.delete_cookie(settings.access_cookie_name, path="/")
-    response.delete_cookie(settings.refresh_cookie_name, path="/")
+    response.delete_cookie(settings.access_cookie_name, path="/", domain=settings.cookie_domain or None)
+    response.delete_cookie(settings.refresh_cookie_name, path="/", domain=settings.cookie_domain or None)
 
 
 def set_pkce_cookie(response: Response, value: str) -> None:
@@ -39,4 +40,4 @@ def set_pkce_cookie(response: Response, value: str) -> None:
 
 
 def clear_pkce_cookie(response: Response) -> None:
-    response.delete_cookie(settings.pkce_cookie_name, path="/")
+    response.delete_cookie(settings.pkce_cookie_name, path="/", domain=settings.cookie_domain or None)

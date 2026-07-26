@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Cookies
     cookie_secure: bool = False
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    cookie_domain: str | None = None
     access_cookie_name: str = "sb-access-token"
     refresh_cookie_name: str = "sb-refresh-token"
     pkce_cookie_name: str = "sb-pkce"
