@@ -254,7 +254,7 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0003_home_content.sql` | `public.home_content` (singleton id=1) |
 | `0003_submissions.sql` | `public.submissions` (type, status, data JSONB) — **note: same prefix as above; run both** |
 | `0004_apple_music_and_new_artist_queue.sql` | `profiles.apple_music_url`, `public.new_artist_queue` |
-| *(inline migration)* | `subscriptions.plan_confirmed` boolean (added with `IF NOT EXISTS` guard in `billing/service.py`) |
+| `0005_plan_confirmed.sql` | `subscriptions.plan_confirmed` boolean (default false; backfills paid users to true) |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
@@ -354,7 +354,7 @@ exposed. `SERVICE_ROLE_KEY` is server-only — never ship to client.
 ## One-time Supabase setup (manual)
 
 1. Run each SQL file in `supabase/migrations/` via the Supabase SQL editor.
-   Order matters: 0001 → 0002 → both 0003 files (either order) → 0004.
+   Order matters: 0001 → 0002 → both 0003 files (either order) → 0004 → 0005.
    Note there are **two files prefixed `0003_`** — run both.
 2. Enable the **custom access-token hook**:
    Auth → Hooks → JWT Claims Customization →

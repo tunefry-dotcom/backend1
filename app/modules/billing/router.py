@@ -91,9 +91,9 @@ def _my_plan_response(
         status=life["status"],
         expires_at=life["expires_at"],
         days_remaining=life["days_remaining"],
-        # Default True so existing users aren't blocked before the plan_confirmed
-        # migration runs. Once the column exists the DB value takes over.
-        plan_confirmed=row.get("plan_confirmed", True) if row else False,
+        # Column exists (0005_plan_confirmed.sql). Default False so a new user
+        # who hasn't visited /plan yet is correctly gated by PlanGate.
+        plan_confirmed=row.get("plan_confirmed", False) if row else False,
     )
 
 
