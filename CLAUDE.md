@@ -105,8 +105,21 @@ src/
   styles/                     # component-scoped CSS (custom, no UI library)
 ```
 
-**Frontend → backend:** all calls use `credentials: 'include'` (cookies);
-base URL hardcoded to `https://backend1-xzx5.onrender.com`.
+**Frontend → backend:** all calls use `credentials: 'include'` (cookies). The
+API base URL is centralized in `src/lib/config.js` as `API_BASE` — read from the
+`VITE_API_BASE` env var, falling back to `https://backend1-xzx5.onrender.com`.
+Do not hardcode the backend URL in new files; import `API_BASE` from
+`src/lib/config.js` instead.
+
+**Known issue — Safari/incognito login (DEFERRED):** because the frontend
+(Vercel / tunefry.com) and backend (onrender) are on different registrable
+domains, the session cookie is third-party and gets blocked by iOS Safari (ITP)
+and incognito mode, bouncing the user back to `/home` after login. Normal
+browsers are unaffected. The fix (shared parent domain via `COOKIE_DOMAIN`, or a
+Bearer-token/localStorage auth switch) is deferred — both require DNS or a larger
+refactor. Full write-up in `docs/auth-crosssite-cookie-fix.md`. The backend
+already has an optional `COOKIE_DOMAIN` env var (default unset = host-only
+cookies, current behavior) staged for when the fix is picked up.
 
 **Auth state machine:**
 - `user === undefined` → loading (shows splash)
