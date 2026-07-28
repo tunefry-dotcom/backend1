@@ -180,11 +180,13 @@ async def list_users(q: str = Query(default="")) -> dict:
 # ---------------------------------------------------------------------------
 
 _CATEGORY_TYPES: dict[str, list[str]] = {
-    "songs":           ["new_song", "transfer_song"],
-    "albums":          ["new_album", "transfer_album"],
+    "new-songs":        ["new_song"],
+    "transfer-songs":   ["transfer_song"],
+    "new-albums":       ["new_album"],
+    "transfer-albums":  ["transfer_album"],
     "profile-mismatch": ["profile_mismatch"],
-    "claim-removal":   ["claim_removal"],
-    "insta-link":      ["insta_link"],
+    "claim-removal":    ["claim_removal"],
+    "insta-link":       ["insta_link"],
 }
 
 
@@ -225,6 +227,29 @@ async def list_submissions(
         ) from exc
 
     all_items = resp.data or []
+
+    # Overwrite the stored user_plan snapshot with the user's *current* plan,
+    # joined live from subscriptions (same source as the All Users tab). The
+    # stored value is captured from the JWT at submission time and is stale
+    # (or free) after upgrades or if the access-token hook isn't stamping it.
+    try:
+        raw_users = _fetch_all_users(svc)
+        all_subs = _fetch_all_rows(
+            svc, "subscriptions", "user_id,plan,status,expires_at,started_at"
+        )
+        sub_map: dict[str, dict] = {row["user_id"]: row for row in all_subs}
+        email_plan: dict[str, str] = {}
+        for u in raw_users:
+            uid = str(getattr(u, "id", "") or "")
+            email = (getattr(u, "email", "") or "").lower()
+            if email:
+                email_plan[email] = sub_map.get(uid, {}).get("plan") or "free"
+        for item in all_items:
+            key = (item.get("user_email") or "").lower()
+            item["user_plan"] = email_plan.get(key, item.get("user_plan") or "free")
+    except Exception:
+        pass  # best-effort — fall back to the stored snapshot on any failure
+
     total = len(all_items)
     offset = (page - 1) * per_page
     total_pages = max(1, -(-total // per_page))
