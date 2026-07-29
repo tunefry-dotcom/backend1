@@ -219,7 +219,7 @@ cookies, current behavior) staged for when the fix is picked up.
 | PATCH | `/admin/users/{uid}` | Update plan / auth metadata / profile |
 | DELETE | `/admin/users/{uid}` | Delete user (cascades) |
 | GET | `/admin/submissions/{category}` | Pending-first list; category ∈ `new-songs`, `transfer-songs`, `new-albums`, `transfer-albums`, `profile-mismatch`, `claim-removal`, `insta-link` (new/transfer are split — not combined `songs`/`albums`). Plan badge = user's **live** plan (joined from `subscriptions`), not the stored `user_plan` snapshot. Optional `?q=` (substring match on song/album title from `data` JSONB **or** `user_email`) and `?plan=` (filter by live plan; `all`/blank = no filter) — both applied server-side **after** the live-plan join and **before** pagination, so `total`/`total_pages` reflect the filtered set |
-| PATCH | `/admin/submissions/{id}` | Approve / decline; inserts new-artist-queue if approved |
+| PATCH | `/admin/submissions/{id}` | Approve / decline; inserts new-artist-queue if approved; fires non-blocking `asyncio.create_task(send_email(...))` to artist via Resend — failure never blocks the response |
 | DELETE | `/admin/submissions` | Bulk delete; JSON body `{ids: [...]}` (single or many). Also deletes each row's R2 files (`cover_art_key`/`audio_key`/`songs[].audio_key`) — but only keys **no surviving submission still references** (R2 keys are `{artist}/{release}`-derived and not unique per row, so resubmits share objects). Returns `{deleted: N}` |
 | GET | `/admin/new-artist-queue` | Pending queue entries |
 | PATCH | `/admin/new-artist-queue/{id}` | Save Spotify + Apple Music links |
@@ -228,6 +228,12 @@ cookies, current behavior) staged for when the fix is picked up.
 | PUT | `/admin/home` | Update CMS content |
 | POST | `/admin/home/artist-image` | Upload artist image to R2 (5 MB, JPEG/PNG/WebP) |
 | GET | `/admin/media/download-url` | 15-min presigned R2 GET URL for a key |
+| POST | `/admin/notifications` | Admin-only; inserts a broadcast row into `public.notifications`; body `{title, body}` |
+
+### Notifications
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/notifications/announcements` | Protected (auth cookie required); returns last 20 admin broadcast rows ordered by `created_at DESC` |
 
 ## Plans / entitlements
 
@@ -269,6 +275,7 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0003_submissions.sql` | `public.submissions` (type, status, data JSONB) — **note: same prefix as above; run both** |
 | `0004_apple_music_and_new_artist_queue.sql` | `profiles.apple_music_url`, `public.new_artist_queue` |
 | `0005_plan_confirmed.sql` | `subscriptions.plan_confirmed` boolean (default false; backfills paid users to true) |
+| `0006_notifications.sql` | `public.notifications` (id UUID PK, title TEXT, body TEXT, created_at TIMESTAMPTZ); no RLS — read/write via service-role only through API |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.

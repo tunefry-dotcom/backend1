@@ -5,6 +5,8 @@ All routes require X-Admin-Secret header matching settings.admin_secret.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
 from uuid import uuid4
@@ -14,6 +16,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.core.email import send_email, submission_review_email_html
 from app.core.r2_client import delete_keys, presign_get, upload_bytes
 from app.core.supabase_client import get_service_client
 from app.modules.billing.plans import Plan, get_spec
@@ -21,6 +24,8 @@ from app.modules.billing.service import assign_plan
 from app.modules.home import service as home_service
 from app.modules.home.schemas import HomeContent
 from app.modules.profile import service as profile_service
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -195,6 +200,11 @@ class ReviewBody(BaseModel):
     admin_note: str = ""
 
 
+class BroadcastBody(BaseModel):
+    title: str
+    body: str = ""
+
+
 def _submission_title(data: dict) -> str:
     """Best-effort display title for a submission (mirrors the frontend subTitle)."""
     for key in ("song_title", "album_name", "section_name", "song_name", "instagram_url"):
@@ -347,7 +357,50 @@ async def review_submission(submission_id: str, body: ReviewBody) -> dict:
             except Exception:
                 pass  # best-effort — don't block the approval
 
+    # Fire-and-forget email to the artist (non-blocking — approval/decline is never held back).
+    _user_email: str = submission.get("user_email") or ""
+    if _user_email:
+        _title = _submission_title(submission.get("data") or {}) or (
+            submission.get("submission_type", "submission").replace("_", " ").title()
+        )
+        _subject = (
+            "Your submission was approved 🎉"
+            if body.status == "approved"
+            else f"Submission update — {_title}"
+        )
+        try:
+            asyncio.create_task(
+                send_email(
+                    to=_user_email,
+                    subject=_subject,
+                    html_body=submission_review_email_html(body.status, _title, body.admin_note),
+                )
+            )
+        except Exception:
+            _log.warning("Could not schedule submission review email", exc_info=True)
+
     return submission
+
+
+@router.post("/notifications", dependencies=[Depends(_require_admin)])
+async def create_notification(body: BroadcastBody) -> dict:
+    """Push a broadcast announcement to all users' notification bell."""
+    if not body.title.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="title is required")
+    svc = get_service_client()
+    try:
+        resp = (
+            svc.table("notifications")
+            .insert({"title": body.title.strip(), "body": body.body.strip()})
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not create notification: {exc}",
+        ) from exc
+    row = resp.data[0] if resp.data else {}
+    return {"ok": True, "id": row.get("id")}
 
 
 class DeleteBody(BaseModel):

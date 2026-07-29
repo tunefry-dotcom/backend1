@@ -72,6 +72,45 @@ def confirmation_email_html(full_name: str | None, confirm_url: str) -> str:
 </html>"""
 
 
+def submission_review_email_html(status: str, title: str, admin_note: str) -> str:
+    """Branded HTML for submission approval / decline notifications."""
+    is_approved = status == "approved"
+    emoji = "🎉" if is_approved else "📋"
+    heading = "Your submission was approved!" if is_approved else "Submission update"
+    color = "#22C55E" if is_approved else "#F26522"
+    status_label = "Approved" if is_approved else "Declined"
+    safe_title = _html.escape(title)
+    note_block = (
+        f'<p style="color:#aaa;font-size:14px;line-height:1.6;margin:16px 0 0;">'
+        f'<strong style="color:#d1d5db;">Admin note:</strong> {_html.escape(admin_note)}</p>'
+        if admin_note.strip() else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:0;background:#0a0a0a;font-family:system-ui,-apple-system,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;padding:40px 24px;">
+    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:16px;padding:40px 32px;text-align:center;">
+      <div style="font-size:40px;margin-bottom:12px;">{emoji}</div>
+      <h1 style="color:#f0f0f0;font-size:22px;margin:0 0 8px;">{heading}</h1>
+      <p style="color:#aaa;font-size:15px;line-height:1.6;margin:0 0 20px;">
+        Your submission <strong style="color:#f0f0f0;">&ldquo;{safe_title}&rdquo;</strong> has been reviewed.
+      </p>
+      <div style="display:inline-block;padding:8px 24px;background:rgba(255,255,255,0.06);
+                  border:1px solid {color}33;border-radius:999px;
+                  color:{color};font-size:14px;font-weight:700;letter-spacing:.04em;">
+        {status_label}
+      </div>
+      {note_block}
+      <p style="color:#555;font-size:12px;margin:28px 0 0;line-height:1.6;">
+        Log in to your <a href="https://tunefry.com" style="color:#F26522;">Tunefry dashboard</a>
+        to view your releases and next steps.
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 def password_reset_email_html(reset_url: str) -> str:
     """Branded HTML for the password-reset email. ``reset_url`` is built server-side."""
     return f"""<!DOCTYPE html>
