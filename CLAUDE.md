@@ -218,7 +218,7 @@ cookies, current behavior) staged for when the fix is picked up.
 | GET | `/admin/users` | Paginated users + subscriptions + profiles |
 | PATCH | `/admin/users/{uid}` | Update plan / auth metadata / profile |
 | DELETE | `/admin/users/{uid}` | Delete user (cascades) |
-| GET | `/admin/submissions/{category}` | Pending-first submission list |
+| GET | `/admin/submissions/{category}` | Pending-first list; category ∈ `new-songs`, `transfer-songs`, `new-albums`, `transfer-albums`, `profile-mismatch`, `claim-removal`, `insta-link` (new/transfer are split — not combined `songs`/`albums`). Plan badge = user's **live** plan (joined from `subscriptions`), not the stored `user_plan` snapshot |
 | PATCH | `/admin/submissions/{id}` | Approve / decline; inserts new-artist-queue if approved |
 | GET | `/admin/new-artist-queue` | Pending queue entries |
 | PATCH | `/admin/new-artist-queue/{id}` | Save Spotify + Apple Music links |
@@ -303,6 +303,20 @@ filename only. Data stored as JSONB in `submissions.data`.
 On admin approval with `new_artist=true`, a row is inserted into
 `new_artist_queue`; admin then saves Spotify + Apple Music links via
 `PATCH /admin/new-artist-queue/{id}`, which also updates `profiles`.
+
+**Form parity:** `NewSong.jsx` and `TransferSong.jsx` (frontend) must submit the
+same field set; Transfer additionally sends `upc_code` / `isrc_code`. Both share
+the `tunefryCustomLabelName` localStorage key for the `CUSTOM_LABEL` entitlement,
+and store `yt_beat` / `explicit` / `yt_content_id` as lowercase `yes`/`no` and
+genre under the `genre` key. Submission rows are **immutable JSONB** — data is
+captured at submit time and never backfilled, so historical rows keep only the
+fields that existed when they were created (they won't gain later-added fields).
+
+**Admin plan display:** `list_submissions` overrides each row's stored
+`user_plan` with the user's live plan (email → user_id → `subscriptions` join,
+same source as `/admin/users`). The stored `submissions.user_plan` is a stale
+JWT snapshot — it reads free after upgrades, or for everyone if the
+access-token hook isn't stamping the plan claim.
 
 ## Env vars
 
