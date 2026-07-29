@@ -313,6 +313,19 @@ genre under the `genre` key. Submission rows are **immutable JSONB** — data is
 captured at submit time and never backfilled, so historical rows keep only the
 fields that existed when they were created (they won't gain later-added fields).
 
+**Album forms (`NewAlbum.jsx` / `TransferAlbum.jsx`) mirror the single-song
+forms:** release dates are **album-level** — `original_release_date` /
+`go_live_date` are sent as top-level form fields (one pair per album), NOT
+per-track. There is **no per-track `duration`** (removed — was meaningless).
+Per-track `mood` is a **single string** (`mood` key, matching NewSong), not the
+old `moods` array. When a track's YouTube-beat toggle is "yes" a required
+`yt_beat_link` URL is captured on that track (same as NewSong). `yt_beat` /
+`yt_content_id` / `explicit` serialize to lowercase `yes`/`no` on both album
+forms. Because rows are immutable, **old album rows** still carry the legacy
+shape (per-track `duration`, per-track dates, `moods` array) — the admin viewer
+(`SecretPanel.jsx`) keeps fallback reads (`track.mood ?? track.moods`,
+`track.original_release_date || track.originalReleaseDate`) so they still render.
+
 **Admin plan display:** `list_submissions` overrides each row's stored
 `user_plan` with the user's live plan (email → user_id → `subscriptions` join,
 same source as `/admin/users`). The stored `submissions.user_plan` is a stale
