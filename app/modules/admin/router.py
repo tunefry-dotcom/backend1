@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
-from app.core.r2_client import presign_get, upload_bytes
+from app.core.r2_client import delete_keys, presign_get, upload_bytes
 from app.core.supabase_client import get_service_client
 from app.modules.billing.plans import Plan, get_spec
 from app.modules.billing.service import assign_plan
@@ -195,11 +195,30 @@ class ReviewBody(BaseModel):
     admin_note: str = ""
 
 
+def _submission_title(data: dict) -> str:
+    """Best-effort display title for a submission (mirrors the frontend subTitle)."""
+    for key in ("song_title", "album_name", "section_name", "song_name", "instagram_url"):
+        val = data.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def _submission_keys(data: dict) -> set[str]:
+    """All R2 object keys referenced by a submission's data payload."""
+    keys = {data.get("cover_art_key"), data.get("audio_key")}
+    for song in (data.get("songs") or []):
+        keys.add(song.get("audio_key"))
+    return {k for k in keys if k}
+
+
 @router.get("/submissions/{category}", dependencies=[Depends(_require_admin)])
 async def list_submissions(
     category: str,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=10, ge=1, le=50),
+    q: str = Query(default=""),
+    plan: str = Query(default=""),
 ) -> dict:
     """Paginated submissions for a category.
 
@@ -249,6 +268,19 @@ async def list_submissions(
             item["user_plan"] = email_plan.get(key, item.get("user_plan") or "free")
     except Exception:
         pass  # best-effort — fall back to the stored snapshot on any failure
+
+    # Filter by the user's (live-joined) plan.
+    if plan and plan.lower() != "all":
+        all_items = [it for it in all_items if (it.get("user_plan") or "free") == plan]
+
+    # Search by song/album title or user email (case-insensitive substring).
+    query = q.strip().lower()
+    if query:
+        def _matches(it: dict) -> bool:
+            title = _submission_title(it.get("data") or {}).lower()
+            email = (it.get("user_email") or "").lower()
+            return query in title or query in email
+        all_items = [it for it in all_items if _matches(it)]
 
     total = len(all_items)
     offset = (page - 1) * per_page
@@ -316,6 +348,60 @@ async def review_submission(submission_id: str, body: ReviewBody) -> dict:
                 pass  # best-effort — don't block the approval
 
     return submission
+
+
+class DeleteBody(BaseModel):
+    ids: list[str]
+
+
+@router.delete("/submissions", dependencies=[Depends(_require_admin)])
+async def delete_submissions(body: DeleteBody) -> dict:
+    """Delete one or more submissions (DB rows) and their orphaned R2 files.
+
+    R2 object keys are derived from {artist}/{release} and are NOT unique per
+    submission, so a key is only removed from R2 if no *surviving* submission
+    still references it (otherwise deleting one row would break another's files).
+    """
+    ids = [i for i in body.ids if i]
+    if not ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No ids provided")
+
+    svc = get_service_client()
+
+    # 1. Collect candidate R2 keys from the rows being deleted.
+    try:
+        rows = svc.table("submissions").select("id,data").in_("id", ids).execute().data or []
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch submissions: {exc}",
+        ) from exc
+
+    candidate_keys: set[str] = set()
+    for row in rows:
+        candidate_keys |= _submission_keys(row.get("data") or {})
+
+    # 2. Delete the DB rows.
+    try:
+        svc.table("submissions").delete().in_("id", ids).execute()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not delete submissions: {exc}",
+        ) from exc
+
+    # 3. Best-effort R2 cleanup — only keys no surviving submission references.
+    if settings.r2_enabled and candidate_keys:
+        try:
+            survivors = svc.table("submissions").select("data").execute().data or []
+            still_referenced: set[str] = set()
+            for s in survivors:
+                still_referenced |= _submission_keys(s.get("data") or {})
+            delete_keys(list(candidate_keys - still_referenced))
+        except Exception:
+            pass  # best-effort — never fail the delete on R2 cleanup
+
+    return {"deleted": len(rows)}
 
 
 # ---------------------------------------------------------------------------

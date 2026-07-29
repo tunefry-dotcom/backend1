@@ -218,8 +218,9 @@ cookies, current behavior) staged for when the fix is picked up.
 | GET | `/admin/users` | Paginated users + subscriptions + profiles |
 | PATCH | `/admin/users/{uid}` | Update plan / auth metadata / profile |
 | DELETE | `/admin/users/{uid}` | Delete user (cascades) |
-| GET | `/admin/submissions/{category}` | Pending-first list; category ∈ `new-songs`, `transfer-songs`, `new-albums`, `transfer-albums`, `profile-mismatch`, `claim-removal`, `insta-link` (new/transfer are split — not combined `songs`/`albums`). Plan badge = user's **live** plan (joined from `subscriptions`), not the stored `user_plan` snapshot |
+| GET | `/admin/submissions/{category}` | Pending-first list; category ∈ `new-songs`, `transfer-songs`, `new-albums`, `transfer-albums`, `profile-mismatch`, `claim-removal`, `insta-link` (new/transfer are split — not combined `songs`/`albums`). Plan badge = user's **live** plan (joined from `subscriptions`), not the stored `user_plan` snapshot. Optional `?q=` (substring match on song/album title from `data` JSONB **or** `user_email`) and `?plan=` (filter by live plan; `all`/blank = no filter) — both applied server-side **after** the live-plan join and **before** pagination, so `total`/`total_pages` reflect the filtered set |
 | PATCH | `/admin/submissions/{id}` | Approve / decline; inserts new-artist-queue if approved |
+| DELETE | `/admin/submissions` | Bulk delete; JSON body `{ids: [...]}` (single or many). Also deletes each row's R2 files (`cover_art_key`/`audio_key`/`songs[].audio_key`) — but only keys **no surviving submission still references** (R2 keys are `{artist}/{release}`-derived and not unique per row, so resubmits share objects). Returns `{deleted: N}` |
 | GET | `/admin/new-artist-queue` | Pending queue entries |
 | PATCH | `/admin/new-artist-queue/{id}` | Save Spotify + Apple Music links |
 | GET | `/admin/purchases` | All paid subscriptions + revenue stats |

@@ -105,3 +105,14 @@ def upload_bytes(key: str, content: bytes, content_type: str) -> None:
         Body=content,
         ContentType=content_type,
     )
+
+
+def delete_keys(keys: list[str]) -> None:
+    """Best-effort batch delete of R2 objects. Ignores empty keys and no-ops."""
+    objs = [{"Key": k} for k in keys if k]
+    if not objs:
+        return
+    _get_r2().delete_objects(
+        Bucket=settings.r2_bucket_name,
+        Delete={"Objects": objs, "Quiet": True},
+    )
