@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -406,6 +407,95 @@ async def create_notification(body: BroadcastBody) -> dict:
         ) from exc
     row = resp.data[0] if resp.data else {}
     return {"ok": True, "id": row.get("id")}
+
+
+# ---------------------------------------------------------------------------
+# Withdrawal requests
+# ---------------------------------------------------------------------------
+def _to_decimal(v: Any) -> Decimal:
+    try:
+        return Decimal(str(v)) if v is not None else Decimal("0")
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+@router.get("/withdrawals", dependencies=[Depends(_require_admin)])
+async def list_withdrawals() -> dict:
+    """All withdrawal requests, pending first then newest — with the artist
+    snapshot (plan / name / address / age) and payout details for payout."""
+    svc = get_service_client()
+    try:
+        rows = _fetch_all_rows(
+            svc, "withdrawal_requests",
+            "id,user_id,user_email,amount,status,method,payout_details,"
+            "snapshot,admin_note,requested_at,processed_at",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Could not fetch withdrawals: {exc}") from exc
+    # pending first; within each group, most-recently requested first
+    rows.sort(key=lambda r: _fmt(r.get("requested_at")) or "", reverse=True)
+    rows.sort(key=lambda r: r.get("status") != "pending")
+    total_pending = sum(_to_decimal(r["amount"]) for r in rows if r.get("status") == "pending")
+    return {"requests": rows, "total_pending": float(total_pending)}
+
+
+class WithdrawalReviewBody(BaseModel):
+    status: str  # only "paid" is accepted (admin marks a request as paid)
+    admin_note: str | None = None
+
+
+@router.patch("/withdrawals/{request_id}", dependencies=[Depends(_require_admin)])
+async def review_withdrawal(request_id: str, body: WithdrawalReviewBody) -> dict:
+    """Mark a request as paid. Balance was already zeroed at request time, so no
+    balance change is needed here (the amount stays counted as withdrawn)."""
+    if body.status != "paid":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="status must be 'paid'")
+    svc = get_service_client()
+    try:
+        resp = (svc.table("withdrawal_requests").update({
+            "status": "paid",
+            "admin_note": body.admin_note,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", request_id).execute())
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Could not update withdrawal: {exc}") from exc
+    if not resp.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
+    return {"ok": True, "request": resp.data[0]}
+
+
+@router.delete("/withdrawals/{request_id}", dependencies=[Depends(_require_admin)])
+async def delete_withdrawal(request_id: str) -> dict:
+    """Delete a request. If it was NOT paid, credit the reserved amount back to
+    the artist's available_balance so no earnings are lost (the request had
+    zeroed it). Deleting a paid request never credits back."""
+    svc = get_service_client()
+    try:
+        res = (svc.table("withdrawal_requests")
+               .select("user_email,amount,status").eq("id", request_id).limit(1).execute())
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Could not fetch withdrawal: {exc}") from exc
+    row = (res.data or [None])[0]
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
+
+    if row.get("status") != "paid":
+        email = (row.get("user_email") or "").lower()
+        bal = (svc.table("artist_balances").select("available_balance")
+               .eq("user_email", email).limit(1).execute())
+        current = _to_decimal((bal.data or [{}])[0].get("available_balance"))
+        new_balance = current + _to_decimal(row.get("amount"))
+        svc.table("artist_balances").update({
+            "available_balance": str(new_balance),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }).eq("user_email", email).execute()
+
+    svc.table("withdrawal_requests").delete().eq("id", request_id).execute()
+    return {"ok": True, "deleted": request_id}
 
 
 class DeleteBody(BaseModel):
