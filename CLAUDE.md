@@ -73,6 +73,10 @@ app/
       router.py               # POST /media/presign → R2 presigned PUT URL
     submissions/
       router.py               # POST /submissions/{type}; GET /submissions/my
+    earnings/
+      router.py               # /earnings/* + /withdrawals (artist earnings + payouts)
+      service.py              # song_stats/artist_balances reads; create_withdrawal (zeroes balance)
+      schemas.py              # WithdrawalRequestBody
     admin/
       router.py               # /admin/* (X-Admin-Secret header required)
 templates/
@@ -229,11 +233,23 @@ cookies, current behavior) staged for when the fix is picked up.
 | POST | `/admin/home/artist-image` | Upload artist image to R2 (5 MB, JPEG/PNG/WebP) |
 | GET | `/admin/media/download-url` | 15-min presigned R2 GET URL for a key |
 | POST | `/admin/notifications` | Admin-only; inserts a broadcast row into `public.notifications`; body `{title, body}` |
+| GET | `/admin/withdrawals` | All withdrawal requests, **pending first** then newest; each row carries the artist `snapshot` (plan/name/city/state/age) + `payout_details`. Returns `{requests, total_pending}` |
+| PATCH | `/admin/withdrawals/{id}` | Mark request **paid** (`{status:"paid", admin_note?}`); sets `processed_at`. Balance was already zeroed at request time so no balance change here |
+| DELETE | `/admin/withdrawals/{id}` | Delete a request. If it was **not** paid, credits `amount` back to `artist_balances.available_balance` (so no earnings are lost); paid requests are removed without crediting |
 
 ### Notifications
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/notifications/announcements` | Protected (auth cookie required); returns last 20 admin broadcast rows ordered by `created_at DESC` |
+
+### Earnings / Withdrawals
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/earnings/me` | Protected — `{total_streams, total_revenue, available_balance, songs[]}` from `public.song_stats`, scoped by `current_user.email` |
+| GET | `/earnings/balance` | Protected — `{available_balance, total_earned, total_withdrawn, min_withdrawal: 1500, eligible}` from `public.artist_balances` |
+| GET | `/earnings/songs/{submission_id}` | Protected — per-release platform-group breakdown (`platforms[]`, majors + `Other`) + monthly trend (`monthly[]`) |
+| GET | `/withdrawals/me` | Protected — the user's own withdrawal request history |
+| POST | `/withdrawals` | Protected — creates a **full-balance** payout request. Amount is server-derived from `artist_balances` (never trusts client), must be ≥ ₹1500; snapshots artist plan/name/city/state/age-from-DOB + `payout_details` (UPI or bank); on success **zeroes** `available_balance`. 400 if below the minimum. Admin later marks it paid or deletes it |
 
 ## Plans / entitlements
 
@@ -277,10 +293,12 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0005_plan_confirmed.sql` | `subscriptions.plan_confirmed` boolean (default false; backfills paid users to true) |
 | `0006_notifications.sql` | `public.notifications` (id UUID PK, title TEXT, body TEXT, created_at TIMESTAMPTZ); no RLS — read/write via service-role only through API |
 | `0007_backfill_profile_names.sql` | One-time backfill: copies `full_name`/`artist_name`/`phone` from `auth.users.raw_user_meta_data` → `public.profiles` for rows where the column is NULL/empty. COALESCE-safe — never overwrites existing values. Run Step 1 (SELECT) first as dry-run, then Step 2 (UPDATE). |
+| `0008_earnings.sql` | `public.song_stats` (per song × platform-group × month; `revenue NUMERIC(20,10)`; UNIQUE `(user_email, song_title, platform, period_month, period_year)` → monthly upsert is idempotent), `public.artist_balances` (per-user `total_earned`/`total_withdrawn`/`available_balance`, all `NUMERIC(20,10)`), `public.withdrawal_requests` (payout queue; `amount`, `status` ∈ `pending`/`paid`, `method`, `payout_details` JSONB, `snapshot` JSONB). RLS: authenticated read-own by JWT email/uid; service-role writes only. Populated by `migration/ingest_streams.py`. |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
 - `profiles`: user reads own row; service-role writes only.
+- `song_stats` / `artist_balances` / `withdrawal_requests`: user reads own rows (by JWT email/uid); service-role writes only.
 - `home_content`: public read; service-role write.
 - `submissions`: service-role read/write only.
 
@@ -426,6 +444,7 @@ One-time scripts to import artists + releases from the legacy SQL Server dump
 | `migrate_users.py` | Creates Supabase auth users + `profiles` + `subscriptions` rows from legacy `Users`/`PaymentDetails` tables |
 | `migrate_releases.py` | Inserts `submissions` rows from legacy `ReleaseDetails` table; requires users already present |
 | `fix_migrated_status.py` | One-time corrector: sets migrated rows to `declined` where `IsActive=0`; idempotent |
+| `ingest_streams.py` | **Monthly** re-runnable ingest of legacy `dbo.MusicStreams` → `public.song_stats` + `public.artist_balances`. Also flips the matched `submissions` row to `approved` (a song with stream data went live — fixes the "Declined" display bug). Idempotent (song_stats UNIQUE-key upsert); upsert/insert-only, never deletes. Dry-run first. See invariants below. |
 
 ### Key invariants
 
@@ -444,6 +463,28 @@ One-time scripts to import artists + releases from the legacy SQL Server dump
 - **`plan_confirmed`** — set to `True` for any paid plan subscription row written by
   `migrate_users.py`; required for the app to surface non-free plans.
 
+### `ingest_streams.py` invariants (earnings — money-critical)
+
+- **Attribution** — a `MusicStreams` row maps to a user via `(ArtistName, Song)` →
+  `ReleaseDetails.(Artist, Song|SongTitle)` → `ReleaseID` → the migrated `submissions`
+  row (`data->>legacy_release_id`) → `user_email` + `submission_id`. Fallback:
+  `ArtistName` → `Users.ArtistName` → `Email` (no `submission_id`). Unmatched rows are
+  counted and skipped (never guessed).
+- **`IsDeleted=1` rows are EXCLUDED** from earnings (soft-deleted); only `0`/NULL count.
+- **Revenue is full-precision** — summed from the `Decimal(18,10)` `Revenue` column into
+  `NUMERIC(20,10)`; `RedeemedAmount` is ignored for totals. `MusicStreams.Revenue` is the
+  artist-payable net — plan royalty % is **not** re-applied.
+- **`platform_group`** collapses the messy platform variants into majors (Spotify, Apple
+  Music, YouTube, Facebook/Meta, Amazon, JioSaavn, Gaana, TikTok); everything else →
+  `Other`. The negative-revenue rows on pseudo-platform `tunefry` are prior redemptions:
+  excluded from `song_stats`, counted as withdrawn.
+- **Balance** — `available_balance = total_earned − total_withdrawn − pending`, where
+  `total_withdrawn` = tunefry adjustments + `WithdrawalHistory` (Completed) + Supabase
+  `withdrawal_requests` (paid), and `pending` = Supabase requests still `pending`. So a
+  re-run never resurrects a balance a user already requested. Never goes negative.
+- **Withdrawal amount is server-derived** (= full `available_balance`, must be ≥ ₹1500);
+  requesting zeroes the balance. Admin `Delete` on an unpaid request credits it back.
+
 ### Production safety
 
 Running `migrate_users.py` (even with the create-only default) against live production
@@ -453,6 +494,7 @@ incident (no backup on free Supabase plan). Always dry-run first:
 ```bash
 python migration/migrate_users.py "<dump.sql>" --dry-run
 python migration/migrate_releases.py "<dump.sql>" --dry-run
+python migration/ingest_streams.py "<dump.sql>" --dry-run
 ```
 
 ## Deploy

@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.modules.admin.router import router as admin_router
 from app.modules.auth.router import router as auth_router
 from app.modules.billing.router import router as billing_router
+from app.modules.earnings.router import router as earnings_router
 from app.modules.home.router import router as home_router
 from app.modules.media.router import router as media_router
 from app.modules.notifications.router import router as notifications_router
@@ -49,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(auth_router)
     app.include_router(billing_router)
+    app.include_router(earnings_router)
     app.include_router(home_router)
     app.include_router(media_router)
     app.include_router(notifications_router)
