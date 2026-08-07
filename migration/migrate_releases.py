@@ -47,13 +47,16 @@ def _closing_paren(s: str) -> int:
 def parse_values(raw: str) -> list[str | None]:
     """Tokenise a SQL VALUES list (without outer parens).
 
-    Handles: NULL, N'unicode', '' escaped quotes, integers, dates,
-    CAST(N'...' AS Type) — the inner ) just accumulates in buf since
-    only , outside strings triggers a new token.
+    Handles: NULL, N'unicode', '' escaped quotes, integers, dates, and
+    CAST(N'...' AS Type) — including types that themselves contain a comma
+    such as Decimal(18, 10). Parenthesis depth is tracked so a comma inside
+    a CAST type does NOT start a new token; only commas at depth 0 (and
+    outside strings) split.
     """
     tokens: list[str | None] = []
     buf = ""
     in_str = False
+    depth = 0
     i = 0
     while i < len(raw):
         c = raw[i]
@@ -65,7 +68,11 @@ def parse_values(raw: str) -> list[str | None]:
                 in_str = True
                 i += 1
                 continue
-            if c == ",":
+            if c == "(":
+                depth += 1
+            elif c == ")" and depth > 0:
+                depth -= 1
+            if c == "," and depth == 0:
                 v = buf.strip()
                 tokens.append(None if v.upper() == "NULL" else v)
                 buf = ""
@@ -88,20 +95,44 @@ def parse_values(raw: str) -> list[str | None]:
     return tokens
 
 
+def iter_insert_statements(lines: list[str], prefix_upper: str):
+    """Yield complete INSERT statements for a table prefix (case-insensitive).
+
+    SSMS exports put each INSERT on one line, BUT nvarchar(max) fields can hold
+    user-entered newlines (e.g. a multi-line bio), which split a single row
+    across several physical lines. We reassemble those: once a line matches the
+    prefix, keep appending following lines until the buffer has balanced single
+    quotes (escaped '' stay even) AND ends with ')'. Only matching rows ever
+    accumulate, so unrelated huge tables (ErrorLog stack traces) are never
+    joined — avoiding the O(n²) concat the original single-line parser dodged.
+    """
+    n = len(lines)
+    i = 0
+    while i < n:
+        line = lines[i].strip()
+        if line.upper().startswith(prefix_upper):
+            stmt = line
+            while (stmt.count("'") % 2 != 0) or not stmt.rstrip().endswith(")"):
+                i += 1
+                if i >= n:
+                    break
+                stmt += "\n" + lines[i]
+            yield stmt
+        i += 1
+
+
 def parse_table(sql_text: str, schema: str, table: str,
                 wanted: list[str]) -> list[dict]:
     """Extract rows from INSERT statements for [schema].[table].
 
     SQL Server SSMS exports use  INSERT [schema].[table] (cols) VALUES (vals)
-    — no INTO keyword. Each INSERT is on a single line.
+    — no INTO keyword. Rows with embedded newlines are reassembled via
+    iter_insert_statements so they aren't silently dropped.
     """
     prefix = f"INSERT [{schema}].[{table}]".upper()
     rows: list[dict] = []
 
-    for raw_line in sql_text.splitlines():
-        line = raw_line.strip()
-        if not line.upper().startswith(prefix):
-            continue
+    for line in iter_insert_statements(sql_text.splitlines(), prefix):
         try:
             up = line.upper()
             col_open  = line.index("(") + 1
@@ -214,7 +245,7 @@ def main() -> None:
         "ArtworkUrl", "AudioFileUrl", "Isrc", "Upc",
         "DateOfMusicRelease", "GoLiveDate", "ReleaseType",
         "MessageToAdmin", "SpotifyLink", "AppleLink",
-        "YoutubeLink", "AmazonLink",
+        "YoutubeLink", "AmazonLink", "IsActive", "error",
     ])
     print(f"Parsed {len(old_users)} users, {len(releases)} releases from SQL file")
 
@@ -226,8 +257,26 @@ def main() -> None:
     supabase_map = build_supabase_map()   # email.lower() → supabase_uuid
 
     batch: list[dict] = []
-    inserted = skipped = 0
+    inserted = skipped = skipped_existing = 0
     svc = get_service_client()
+
+    # Idempotency: collect legacy_release_ids already imported so a re-run only
+    # backfills new rows instead of duplicating the whole catalogue.
+    existing_ids: set[str] = set()
+    offset = 0
+    while True:
+        res = (svc.table("submissions").select("data")
+               .like("admin_note", "Migrated from legacy system%")
+               .range(offset, offset + 999).execute())
+        page = res.data or []
+        for r in page:
+            lid = str((r.get("data") or {}).get("legacy_release_id") or "").strip()
+            if lid:
+                existing_ids.add(lid)
+        if len(page) < 1000:
+            break
+        offset += 1000
+    print(f"  {len(existing_ids)} releases already migrated — will skip those")
 
     def flush(force: bool = False) -> None:
         nonlocal inserted
@@ -250,6 +299,11 @@ def main() -> None:
             skipped += 1
             continue
 
+        rid = (row.get("ReleaseID") or "").strip()
+        if rid and rid in existing_ids:
+            skipped_existing += 1
+            continue
+
         email   = user_email_map.get(uid_int, "")
         sb_uuid = supabase_map.get(email.lower()) if email else None
 
@@ -261,13 +315,20 @@ def main() -> None:
                     if "album" in (row.get("ReleaseType") or "").lower()
                     else "new_song")
 
+        # Legacy has no status column; IsActive (0=not live) is the signal.
+        status = "declined" if row.get("IsActive") == "0" else "approved"
+        err = (strip_cast(row.get("error")) or "").strip()
+        admin_note = ("Migrated from legacy system — " + err
+                      if status == "declined" and err
+                      else "Migrated from legacy system")
+
         batch.append({
             "user_email":      email,
             "user_plan":       "free",
             "submission_type": sub_type,
-            "status":          "approved",
+            "status":          status,
             "data":            build_data(row, sub_type),
-            "admin_note":      "Migrated from legacy system",
+            "admin_note":      admin_note,
             "reviewed_at":     now,
         })
 
@@ -277,7 +338,8 @@ def main() -> None:
     flush(force=True)
 
     print(f"\n{'DRY RUN — ' if dry_run else ''}Done.")
-    print(f"  inserted={inserted}  skipped(no user match)={skipped}")
+    print(f"  inserted={inserted}  skipped(no user match)={skipped}  "
+          f"skipped(already migrated)={skipped_existing}")
     print()
     print("  NOTE: cover art filenames are stored as data.cover_art_legacy_filename")
     print("        To complete cover art migration, retrieve the Upload/ folder from")

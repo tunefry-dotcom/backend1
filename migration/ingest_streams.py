@@ -45,8 +45,26 @@ sys.path.insert(0, ".")
 from dotenv import load_dotenv; load_dotenv()
 
 from app.core.supabase_client import get_service_client
-# Reuse the battle-tested SQL-dump parser + helpers from the release migration.
-from migration.migrate_releases import parse_table, strip_cast
+# Reuse the battle-tested SQL-dump parser from the release migration.
+from migration.migrate_releases import parse_table
+
+
+def strip_cast(v: str | None) -> str:
+    """Unwrap CAST(<value> AS <type>) → <value>.
+
+    Robust to types that contain parens/commas, e.g.
+    ``CAST(0.02 AS Decimal(18, 10))`` — the shared migrate_releases.strip_cast
+    (regex ``AS \\w+\\)``) can't handle those and would leave the value as 0.
+    """
+    if not v:
+        return ""
+    v = v.strip()
+    if v.upper().startswith("CAST(") and v.endswith(")"):
+        inner = v[5:-1]                 # drop 'CAST(' and trailing ')'
+        idx = inner.rfind(" AS ")       # the cast's AS (type never contains ' AS ')
+        if idx != -1:
+            return inner[:idx].strip()
+    return v
 
 DEFAULT_SQL_FILE = r"C:\Users\ViditVaibhav\Downloads\table with data.sql"
 UPSERT_BATCH = 500
@@ -140,9 +158,13 @@ def load_reserved_withdrawals(svc) -> tuple[dict[str, Decimal], dict[str, Decima
     pending: dict[str, Decimal] = defaultdict(Decimal)
     offset = 0
     while True:
-        res = (svc.table("withdrawal_requests")
-               .select("user_email, amount, status")
-               .range(offset, offset + 999).execute())
+        try:
+            res = (svc.table("withdrawal_requests")
+                   .select("user_email, amount, status")
+                   .range(offset, offset + 999).execute())
+        except Exception:
+            # Table absent / PostgREST schema cache stale — no requests to reserve yet.
+            break
         page = res.data or []
         for r in page:
             email = (r.get("user_email") or "").lower()
@@ -179,7 +201,7 @@ def main() -> None:
     releases = parse_table(sql_text, "dbo", "ReleaseDetails",
                            ["ReleaseID", "Song", "SongTitle", "Artist"])
     users = parse_table(sql_text, "dbo", "Users",
-                        ["UserID", "Email", "ArtistName"])
+                        ["UserID", "Email", "ArtistName", "FullName", "Username"])
     withdrawals = parse_table(sql_text, "dbo", "WithdrawalHistory",
                               ["UserId", "Amount", "Status"])
     print(f"Parsed {len(streams)} stream rows, {len(releases)} releases, "
@@ -190,9 +212,12 @@ def main() -> None:
     print(f"  {len(rid_to_sub)} migrated submissions loaded from Supabase")
 
     # ---- Build attribution maps -------------------------------------------
-    # legacy UserID(int) -> email  and  normalized ArtistName -> email
+    # legacy UserID(int) -> email
     legacy_uid_email: dict[int, str] = {}
-    artist_to_email: dict[str, str] = {}
+    # normalized name (ArtistName / FullName / Username) -> set of emails.
+    # A name is only usable for attribution if it maps to exactly ONE email —
+    # names shared by multiple accounts are dropped to avoid misattributing money.
+    name_emails: dict[str, set[str]] = defaultdict(set)
     for u in users:
         email = (u.get("Email") or "").strip().lower()
         if not email:
@@ -201,9 +226,17 @@ def main() -> None:
             legacy_uid_email[int(float(u["UserID"]))] = email
         except (ValueError, TypeError, KeyError):
             pass
-        an = norm(u.get("ArtistName"))
-        if an and an not in artist_to_email:
-            artist_to_email[an] = email
+        for field in ("ArtistName", "FullName", "Username"):
+            n = norm(u.get(field))
+            if n:
+                name_emails[n].add(email)
+    artist_to_email: dict[str, str] = {
+        name: next(iter(emails)) for name, emails in name_emails.items()
+        if len(emails) == 1
+    }
+    dropped = sum(1 for e in name_emails.values() if len(e) > 1)
+    print(f"  {len(artist_to_email)} names -> unique email "
+          f"({dropped} ambiguous names dropped)")
 
     # (norm artist, norm song|title) -> ReleaseID
     rd_key_to_rid: dict[tuple[str, str], str] = {}
