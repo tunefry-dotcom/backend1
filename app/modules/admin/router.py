@@ -121,7 +121,7 @@ async def list_users(q: str = Query(default="")) -> dict:
         )
         all_profiles = _fetch_all_rows(
             svc, "profiles",
-            "user_id,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth",
+            "user_id,full_name,artist_name,phone,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth",
         )
     except Exception as exc:
         raise HTTPException(
@@ -144,6 +144,11 @@ async def list_users(q: str = Query(default="")) -> dict:
         sub = sub_map.get(uid, {})
         plan: str = sub.get("plan") or app_meta.get("plan", "free") or "free"
         prof = profile_map.get(uid, {})
+        # Profiles table is authoritative; fall back to user_meta for legacy users
+        # whose profiles row predates admin edits writing these fields there.
+        full_name = prof.get("full_name") or full_name
+        artist_name = prof.get("artist_name") or artist_name
+        phone = prof.get("phone") or phone
 
         users.append(
             {
@@ -576,21 +581,14 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
                 )
             assign_plan(user_id, plan_changed)
 
-        # 2. Update auth user_metadata (full_name, artist_name, phone)
-        meta = {k: v for k, v in {
-            "full_name": body.full_name,
-            "artist_name": body.artist_name,
-            "phone": body.phone,
-        }.items() if v is not None and v != ""}
-        if meta:
-            svc.auth.admin.update_user_by_id(user_id, {"user_metadata": meta})
-
-        # 3. Upsert profile fields (exclude plan — not a profile column).
+        # 2. Upsert ALL profile fields into the profiles table.
+        # This includes full_name/artist_name/phone — profiles is the authoritative
+        # store; auth.user_metadata is synced separately as a best-effort step.
         # Skip None and "" — Postgres date columns reject empty strings,
         # and we don't want to clear fields the admin left blank.
         profile_fields = {
             k: v for k, v in body.model_dump().items()
-            if k not in ("full_name", "artist_name", "phone", "plan")
+            if k != "plan"
             and v is not None
             and v != ""
         }
@@ -604,6 +602,19 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not update user: {exc}",
         ) from exc
+
+    # 3. Best-effort sync of name fields to auth.user_metadata so JWT claims
+    # stay current. Failure here is non-fatal — profile table is already saved.
+    meta = {k: v for k, v in {
+        "full_name": body.full_name,
+        "artist_name": body.artist_name,
+        "phone": body.phone,
+    }.items() if v is not None and v != ""}
+    if meta:
+        try:
+            svc.auth.admin.update_user_by_id(user_id, {"user_metadata": meta})
+        except Exception as exc:
+            _log.warning("Could not sync user_metadata for %s: %s", user_id, exc)
 
     result: dict = {"updated": True, "user_id": user_id}
     if plan_changed is not None:

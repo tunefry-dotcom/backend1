@@ -189,7 +189,7 @@ cookies, current behavior) staged for when the fix is picked up.
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/profile/me` | Protected — profile row + is_complete + missing_fields |
-| PUT | `/profile/me` | Protected — partial upsert via service-role |
+| PUT | `/profile/me` | Protected — partial upsert via service-role. `full_name`, `artist_name`, `phone` are in `EDITABLE_FIELDS` and always accepted. On the frontend (`Profile.jsx`) these inputs are `disabled` unless the user has `CUSTOM_LABEL` feature (Double Artist / Label plan); Spotify and Apple Music URLs follow the same gate and additionally lock permanently after first save on lower plans. |
 
 ### Home (CMS)
 | Method | Path | Notes |
@@ -215,8 +215,8 @@ cookies, current behavior) staged for when the fix is picked up.
 ### Admin (X-Admin-Secret header required)
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/admin/users` | Paginated users + subscriptions + profiles |
-| PATCH | `/admin/users/{uid}` | Update plan / auth metadata / profile |
+| GET | `/admin/users` | Paginated users + subscriptions + profiles. `full_name`/`artist_name`/`phone` sourced from `public.profiles` (authoritative) with `auth.users.user_metadata` as fallback for legacy rows. |
+| PATCH | `/admin/users/{uid}` | Writes ALL profile fields (including `full_name`/`artist_name`/`phone`) to `public.profiles` first (blocking). Auth `user_metadata` sync is best-effort afterwards — failure logs a warning but never returns 502. |
 | DELETE | `/admin/users/{uid}` | Delete user (cascades) |
 | GET | `/admin/submissions/{category}` | Pending-first list; category ∈ `new-songs`, `transfer-songs`, `new-albums`, `transfer-albums`, `profile-mismatch`, `claim-removal`, `insta-link` (new/transfer are split — not combined `songs`/`albums`). Plan badge = user's **live** plan (joined from `subscriptions`), not the stored `user_plan` snapshot. Optional `?q=` (substring match on song/album title from `data` JSONB **or** `user_email`) and `?plan=` (filter by live plan; `all`/blank = no filter) — both applied server-side **after** the live-plan join and **before** pagination, so `total`/`total_pages` reflect the filtered set |
 | PATCH | `/admin/submissions/{id}` | Approve / decline; inserts new-artist-queue if approved; fires non-blocking `asyncio.create_task(send_email(...))` to artist via Resend — failure never blocks the response |
@@ -276,6 +276,7 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0004_apple_music_and_new_artist_queue.sql` | `profiles.apple_music_url`, `public.new_artist_queue` |
 | `0005_plan_confirmed.sql` | `subscriptions.plan_confirmed` boolean (default false; backfills paid users to true) |
 | `0006_notifications.sql` | `public.notifications` (id UUID PK, title TEXT, body TEXT, created_at TIMESTAMPTZ); no RLS — read/write via service-role only through API |
+| `0007_backfill_profile_names.sql` | One-time backfill: copies `full_name`/`artist_name`/`phone` from `auth.users.raw_user_meta_data` → `public.profiles` for rows where the column is NULL/empty. COALESCE-safe — never overwrites existing values. Run Step 1 (SELECT) first as dry-run, then Step 2 (UPDATE). |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
@@ -412,6 +413,47 @@ exposed. `SERVICE_ROLE_KEY` is server-only — never ship to client.
    Auth → URL Configuration.
 4. Verify the Resend sender domain in the Resend dashboard; set
    `RESEND_FROM_EMAIL` to a verified address.
+
+## Legacy data migration (`migration/`)
+
+One-time scripts to import artists + releases from the legacy SQL Server dump
+(`*.sql` SSMS export, UTF-16 with BOM).
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `migrate_users.py` | Creates Supabase auth users + `profiles` + `subscriptions` rows from legacy `Users`/`PaymentDetails` tables |
+| `migrate_releases.py` | Inserts `submissions` rows from legacy `ReleaseDetails` table; requires users already present |
+| `fix_migrated_status.py` | One-time corrector: sets migrated rows to `declined` where `IsActive=0`; idempotent |
+
+### Key invariants
+
+- **Multiline robustness** — both scripts use `iter_insert_statements()` (defined in
+  `migrate_releases.py`, imported by `migrate_users.py`) to accumulate physical SQL lines
+  until the quote count is even and the row ends with `)`. Fixes SSMS exports where a
+  free-text field (bio, error message) contains a literal newline that splits the row.
+- **`migrate_users.py` is create-only by default** — existing emails are skipped entirely
+  (no profile/sub upsert). Pass `--update-existing` to re-upsert; this clobbers any
+  post-migration user edits and is **production-dangerous**.
+- **`migrate_releases.py` is idempotent** — pre-fetches the set of
+  `data->>legacy_release_id` from existing migrated rows, skips any `ReleaseID` already
+  present. Safe to re-run; will only insert new releases.
+- **Status derivation** — `IsActive='0'` → `declined`; else `approved`. The `error` field
+  from legacy `ReleaseDetails` is preserved in `admin_note` for declined rows.
+- **`plan_confirmed`** — set to `True` for any paid plan subscription row written by
+  `migrate_users.py`; required for the app to surface non-free plans.
+
+### Production safety
+
+Running `migrate_users.py` (even with the create-only default) against live production
+**will create new auth users** in Supabase if any new emails are in the dump. Re-running
+it with `--update-existing` overwrote ~1,726 subscriptions + 1,727 profiles in one
+incident (no backup on free Supabase plan). Always dry-run first:
+```bash
+python migration/migrate_users.py "<dump.sql>" --dry-run
+python migration/migrate_releases.py "<dump.sql>" --dry-run
+```
 
 ## Deploy
 
