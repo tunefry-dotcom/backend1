@@ -15,6 +15,11 @@ EOF
 }
 
 if [[ "$tool" == "Bash" ]]; then
+  # git push to main = production deploy on Render — always warn.
+  if echo "$input" | grep -Eiq 'git\s+push'; then
+    emit
+    exit 0
+  fi
   # Critical: command that can write to Supabase or run a migration script.
   if echo "$input" | grep -Eiq '\.(update|insert|upsert|delete)\(|migrate_users|migrate_releases|service\.table|get_service_client|admin\.(create_user|update_user|delete_user)|update_user_by_id'; then
     emit
