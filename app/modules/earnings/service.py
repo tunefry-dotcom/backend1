@@ -98,11 +98,14 @@ def get_earnings_summary(email: str) -> dict[str, Any]:
     songs: dict[tuple, dict] = {}
     total_streams = 0
     total_revenue = Decimal("0")
+    by_month: dict[tuple, dict] = {}
+    by_platform: dict[str, dict] = {}
     for r in rows:
         streams = int(r.get("streams") or 0)
         revenue = _dec(r.get("revenue"))
         total_streams += streams
         total_revenue += revenue
+
         key = (r.get("submission_id"), r.get("song_title"))
         s = songs.get(key)
         if s is None:
@@ -119,6 +122,19 @@ def get_earnings_summary(email: str) -> dict[str, Any]:
         s["revenue"] += revenue
         s["_by_platform"][r.get("platform_group") or "Other"] += streams
 
+        mk = (r.get("period_year") or 0, r.get("period_month") or "")
+        mo = by_month.setdefault(mk, {
+            "month": r.get("period_month"), "year": r.get("period_year"),
+            "streams": 0, "revenue": Decimal("0"),
+        })
+        mo["streams"] += streams
+        mo["revenue"] += revenue
+
+        g = r.get("platform_group") or "Other"
+        pg = by_platform.setdefault(g, {"platform_group": g, "streams": 0, "revenue": Decimal("0")})
+        pg["streams"] += streams
+        pg["revenue"] += revenue
+
     song_list = []
     for s in songs.values():
         top = max(s["_by_platform"].items(), key=lambda kv: kv[1])[0] if s["_by_platform"] else None
@@ -132,11 +148,26 @@ def get_earnings_summary(email: str) -> dict[str, Any]:
         })
     song_list.sort(key=lambda x: x["streams"], reverse=True)
 
+    monthly = sorted(
+        [{"month": m["month"], "year": m["year"],
+          "streams": m["streams"], "revenue": _money(m["revenue"])}
+         for m in by_month.values()],
+        key=lambda x: (x["year"] or 0, _MONTH_ORDER.get(x["month"], 0)),
+    )
+    platforms = sorted(
+        [{"platform_group": g["platform_group"], "streams": g["streams"],
+          "revenue": _money(g["revenue"])}
+         for g in by_platform.values()],
+        key=lambda x: x["streams"], reverse=True,
+    )
+
     balance = get_balance(email)
     return {
         "total_streams": total_streams,
         "total_revenue": _money(total_revenue),
         "available_balance": balance["available_balance"],
+        "monthly": monthly,
+        "platforms": platforms,
         "songs": song_list,
     }
 

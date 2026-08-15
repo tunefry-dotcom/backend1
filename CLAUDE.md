@@ -20,7 +20,7 @@ DSPs/stores, manage subscriptions, and get analytics. This repo is the
 | Email | Resend (custom HTTP, replaces Supabase SMTP) |
 | Payments | Razorpay (INR) |
 | Frontend | React 18 + Vite SPA deployed on Vercel |
-| Backend deploy | Render (Docker); live at `https://backend1-xzx5.onrender.com` |
+| Backend deploy | Render (Docker); prod API at `https://api.tunefry.com` (CNAME → `backend1-xzx5.onrender.com`, which still works directly) |
 
 Cloudinary and Upstash are **not used** — R2 replaced Cloudinary; Upstash
 was planned but never wired in.
@@ -111,19 +111,25 @@ src/
 
 **Frontend → backend:** all calls use `credentials: 'include'` (cookies). The
 API base URL is centralized in `src/lib/config.js` as `API_BASE` — read from the
-`VITE_API_BASE` env var, falling back to `https://backend1-xzx5.onrender.com`.
+`VITE_API_BASE` env var (prod = `https://api.tunefry.com`), falling back to
+`https://backend1-xzx5.onrender.com` when the env var is unset.
 Do not hardcode the backend URL in new files; import `API_BASE` from
 `src/lib/config.js` instead.
 
-**Known issue — Safari/incognito login (DEFERRED):** because the frontend
-(Vercel / tunefry.com) and backend (onrender) are on different registrable
-domains, the session cookie is third-party and gets blocked by iOS Safari (ITP)
-and incognito mode, bouncing the user back to `/home` after login. Normal
-browsers are unaffected. The fix (shared parent domain via `COOKIE_DOMAIN`, or a
-Bearer-token/localStorage auth switch) is deferred — both require DNS or a larger
-refactor. Full write-up in `docs/auth-crosssite-cookie-fix.md`. The backend
-already has an optional `COOKIE_DOMAIN` env var (default unset = host-only
-cookies, current behavior) staged for when the fix is picked up.
+**Safari/incognito login — FIXED (2026-08-11) via shared parent domain.** The
+frontend (`tunefry.com`/`www`, Vercel) and backend are now on the same
+registrable domain: backend served at `api.tunefry.com` (Render custom domain,
+CNAME → `backend1-xzx5.onrender.com`). Session cookies are scoped
+`Domain=.tunefry.com` (first-party for both apps), so iOS Safari ITP / incognito
+no longer block them. Production config: Render `COOKIE_DOMAIN=.tunefry.com`,
+`COOKIE_SAMESITE=none`, `COOKIE_SECURE=true`, `FRONTEND_URL=https://tunefry.com`,
+`EXTRA_CORS_ORIGIN=https://www.tunefry.com`,
+`OAUTH_CALLBACK_BASE_URL=https://api.tunefry.com`; Vercel
+`VITE_API_BASE=https://api.tunefry.com` (Vite inlines at build → redeploy needed
+to change); Supabase redirect allowlist includes `tunefry.com` + `api.tunefry.com`.
+**Gotcha:** `VITE_API_BASE` points at a domain that must actually resolve — if
+`api.tunefry.com` DNS/cert is missing, the whole site goes down in *every*
+browser (not just Safari). Full write-up in `docs/auth-crosssite-cookie-fix.md`.
 
 **Auth state machine:**
 - `user === undefined` → loading (shows splash)
@@ -245,7 +251,7 @@ cookies, current behavior) staged for when the fix is picked up.
 ### Earnings / Withdrawals
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/earnings/me` | Protected — `{total_streams, total_revenue, available_balance, songs[]}` from `public.song_stats`, scoped by `current_user.email` |
+| GET | `/earnings/me` | Protected — `{total_streams, total_revenue, available_balance, monthly[], platforms[], songs[]}` from `public.song_stats`, scoped by `current_user.email`. `monthly` = all-songs aggregated monthly totals (sorted chronologically); `platforms` = all-songs aggregated platform totals (sorted by streams desc). `period_month` in `song_stats` is a **full name string** (`"January"` … `"December"`), not a number — chart components must use name-keyed lookups, not array indexing. |
 | GET | `/earnings/balance` | Protected — `{available_balance, total_earned, total_withdrawn, min_withdrawal: 1500, eligible}` from `public.artist_balances` |
 | GET | `/earnings/songs/{submission_id}` | Protected — per-release platform-group breakdown (`platforms[]`, majors + `Other`) + monthly trend (`monthly[]`) |
 | GET | `/withdrawals/me` | Protected — the user's own withdrawal request history |

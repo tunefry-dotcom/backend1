@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/pre-safety-hook.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -7,6 +19,11 @@
           {
             "type": "command",
             "command": "bash .claude/review-hook.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/post-data-safety-hook.sh",
             "timeout": 5
           }
         ]
