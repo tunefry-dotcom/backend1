@@ -12,21 +12,23 @@ fi
 COOLDOWN_FILE="/tmp/claude_review_cooldown"
 COOLDOWN_SECONDS=30
 
+file=$(echo "$input" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+
+# Phase 3 (CLAUDE.md sync) always fires — no cooldown gate.
+# Phases 0-2 (heavy review) are gated by the cooldown to avoid spam.
+IN_COOLDOWN=false
 if [[ -f "$COOLDOWN_FILE" ]]; then
   last_review=$(cat "$COOLDOWN_FILE")
   now=$(date +%s)
   diff=$((now - last_review))
   if [[ $diff -lt $COOLDOWN_SECONDS ]]; then
-    echo '{"continue": true}'
-    exit 0
+    IN_COOLDOWN=true
   fi
 fi
 
-date +%s > "$COOLDOWN_FILE"
-
-file=$(echo "$input" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
-
-cat <<EOF
+if [[ "$IN_COOLDOWN" == "false" ]]; then
+  date +%s > "$COOLDOWN_FILE"
+  cat <<EOF
 {
   "continue": true,
   "hookSpecificOutput": {
@@ -35,3 +37,14 @@ cat <<EOF
   }
 }
 EOF
+else
+  cat <<EOF
+{
+  "continue": true,
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": "PHASE 3 — Documentation sync (review cooldown active, full review skipped):\nThe file $file was just modified. If this change introduced or altered anything durable that a future session would need — a new/changed endpoint, env var, DB column/migration, naming convention, entitlement/plan rule, cross-file invariant, or a non-obvious gotcha — update CLAUDE.md in the SAME turn to match. Skip trivial/local edits; only record architectural or contract-level facts."
+  }
+}
+EOF
+fi

@@ -519,7 +519,7 @@ Three hooks wired in `.claude/settings.json` that fire automatically during Clau
 | Hook | File | Fires on | What it does |
 |------|------|----------|-------------|
 | PreToolUse | `pre-safety-hook.sh` | Every `Bash` + every `Edit`/`Write` (90 s cooldown) | Emits production-safety reminder. **Always** fires on `git push` (push = Render deploy) and on dangerous Bash patterns (Supabase writes, migration scripts). |
-| PostToolUse | `review-hook.sh` | Every `Edit`/`Write` (30 s cooldown) | Full 3-phase review: production safety → code quality (auto-fix) → multi-POV scoring (must reach ≥ 85/100) → CLAUDE.md sync. |
+| PostToolUse | `review-hook.sh` | Every `Edit`/`Write` | **Phase 3 (CLAUDE.md sync) always fires.** Phases 0–2 (full review + scoring) have a 30 s cooldown to avoid spam on rapid multi-file edits — during cooldown a lightweight Phase 3-only reminder is emitted instead. |
 | PostToolUse | `post-data-safety-hook.sh` | Every `Edit`/`Write` (no cooldown) | Targeted safety checklist based on file type: migration SQL → idempotency/blast-radius; dependency files → no-downgrade guard; app source → regression/contract check. |
 
 **Key gotcha**: hooks run via `bash`, so they require Git Bash on Windows (already present). The cooldown files live in `/tmp/` — they reset on reboot or WSL restart, which is fine (just means the first edit after restart always triggers the full reminder).
