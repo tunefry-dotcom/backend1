@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from uuid import uuid4
@@ -419,6 +419,17 @@ def _to_decimal(v: Any) -> Decimal:
         return Decimal("0")
 
 
+def _age_from_dob(dob: Any) -> int | None:
+    if not dob:
+        return None
+    try:
+        d = dob if isinstance(dob, date) else datetime.fromisoformat(str(dob)[:10]).date()
+    except (ValueError, TypeError):
+        return None
+    today = date.today()
+    return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
+
+
 @router.get("/withdrawals", dependencies=[Depends(_require_admin)])
 async def list_withdrawals() -> dict:
     """All withdrawal requests, pending first then newest — with the artist
@@ -436,6 +447,32 @@ async def list_withdrawals() -> dict:
     # pending first; within each group, most-recently requested first
     rows.sort(key=lambda r: _fmt(r.get("requested_at")) or "", reverse=True)
     rows.sort(key=lambda r: r.get("status") != "pending")
+    # Enrich snapshot with live profile data for any null fields (graceful — never blocks).
+    try:
+        uids = list({r["user_id"] for r in rows if r.get("user_id")})
+        if uids:
+            profiles_raw = (
+                svc.table("profiles")
+                .select("id,phone,city,state,date_of_birth")
+                .in_("id", uids)
+                .execute()
+                .data or []
+            )
+            prof_map = {p["id"]: p for p in profiles_raw}
+            for row in rows:
+                prof = prof_map.get(row.get("user_id"), {})
+                snap = row.get("snapshot") or {}
+                if not snap.get("phone"):
+                    snap["phone"] = prof.get("phone")
+                if not snap.get("city"):
+                    snap["city"] = prof.get("city")
+                if not snap.get("state"):
+                    snap["state"] = prof.get("state")
+                if snap.get("age") is None:
+                    snap["age"] = _age_from_dob(prof.get("date_of_birth"))
+                row["snapshot"] = snap
+    except Exception:
+        pass  # enrichment failure must never break the admin list
     total_pending = sum(_to_decimal(r["amount"]) for r in rows if r.get("status") == "pending")
     return {"requests": rows, "total_pending": float(total_pending)}
 
