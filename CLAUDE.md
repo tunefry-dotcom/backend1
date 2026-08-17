@@ -358,6 +358,21 @@ shape (per-track `duration`, per-track dates, `moods` array) — the admin viewe
 (`SecretPanel.jsx`) keeps fallback reads (`track.mood ?? track.moods`,
 `track.original_release_date || track.originalReleaseDate`) so they still render.
 
+**Per-track artist shape (album forms, as of 2026-08-18):**
+`songs[].main_artists[]` = `{name, spotify, apple_music, instagram}` — Instagram
+is **main-artist-only** by design. `songs[].featured_artists[]` =
+`{name, spotify, apple_music}` — Instagram is intentionally **omitted** for
+featured artists (input hidden in both album forms; payload strips it; admin
+viewer skips it even if a legacy row has it). The admin album-track renderer in
+`SecretPanel.jsx` (inside the `k === 'songs'` branch) shows per-artist mini-
+cards with these exact keys — not just names. Historical rows submitted before
+this contract may have `main_artists[].instagram === undefined` and/or
+`featured_artists[].instagram` present; both are handled gracefully by the
+viewer's `filter((k) => a[k])` (empty-key skip) and the hard-coded featured
+key list. **TransferAlbum previously had no UI inputs for the required album
+dates** — fixed 2026-08-18 by mirroring NewAlbum's date-picker JSX into the
+Step-01 Album Info form-grid.
+
 **Admin plan display:** `list_submissions` overrides each row's stored
 `user_plan` with the user's live plan (email → user_id → `subscriptions` join,
 same source as `/admin/users`). The stored `submissions.user_plan` is a stale

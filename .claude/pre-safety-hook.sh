@@ -30,16 +30,6 @@ if [[ "$tool" == "Bash" ]]; then
 fi
 
 if [[ "$tool" == "Edit" || "$tool" == "Write" ]]; then
-  CD=/tmp/claude_presafety_cooldown
-  NOW=$(date +%s)
-  if [[ -f "$CD" ]]; then
-    last=$(cat "$CD")
-    if [[ $((NOW - last)) -lt 90 ]]; then
-      echo '{"continue": true}'
-      exit 0
-    fi
-  fi
-  echo "$NOW" > "$CD"
   emit
   exit 0
 fi
