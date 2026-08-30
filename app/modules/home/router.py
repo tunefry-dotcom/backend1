@@ -13,7 +13,7 @@ router = APIRouter(prefix="/home", tags=["home"])
 
 @router.get("/content")
 async def get_home_content(response: Response) -> HomeContent:
-    response.headers["Cache-Control"] = "public, max-age=300"
+    response.headers["Cache-Control"] = "no-cache"
     return home_service.get_home_content()
 
 

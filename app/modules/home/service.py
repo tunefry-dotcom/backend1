@@ -38,7 +38,8 @@ def upsert_home_content(data: HomeContent) -> HomeContent:
     svc = get_service_client()
     payload = {
         "id": _ROW_ID,
-        **data.model_dump(),
+        # thumbnail_url is a computed field — not a DB column
+        **data.model_dump(exclude={"yt_testimonials": {"__all__": {"thumbnail_url"}}}),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     resp = svc.table(_TABLE).upsert(payload, on_conflict="id").execute()
