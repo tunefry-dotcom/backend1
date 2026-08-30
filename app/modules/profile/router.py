@@ -29,6 +29,7 @@ def _response(row: Optional[dict[str, Any]]) -> ProfileResponse:
         apple_music_url=row.get("apple_music_url"),
         instagram=row.get("instagram"),
         youtube_url=row.get("youtube_url"),
+        custom_label_name=row.get("custom_label_name"),
         is_complete=not missing,
         missing_fields=missing,
     )

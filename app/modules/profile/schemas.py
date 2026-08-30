@@ -22,6 +22,7 @@ class UpdateProfileRequest(BaseModel):
     apple_music_url: Optional[str] = None
     instagram: Optional[str] = None
     youtube_url: Optional[str] = None
+    custom_label_name: Optional[str] = None
 
 
 class ProfileResponse(BaseModel):
@@ -37,6 +38,7 @@ class ProfileResponse(BaseModel):
     apple_music_url: Optional[str] = None
     instagram: Optional[str] = None
     youtube_url: Optional[str] = None
+    custom_label_name: Optional[str] = None
     # Whether the required basic details are filled (gates plan payment).
     is_complete: bool = False
     missing_fields: list[str] = []
