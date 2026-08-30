@@ -61,6 +61,71 @@ def _fetch_song_stats(email: str) -> list[dict[str, Any]]:
     return rows
 
 
+def recompute_balance(email: str) -> dict[str, Any]:
+    """Recompute artist_balances from scratch after any admin song_stats mutation.
+
+    Sums total_earned from all song_stats rows, preserves total_withdrawn
+    (encodes withdrawn_baseline.json + paid requests — cannot be re-derived here),
+    then subtracts pending withdrawal requests for available_balance.
+    """
+    svc = get_service_client()
+
+    rows: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        batch = (
+            svc.table("song_stats")
+            .select("revenue")
+            .eq("user_email", email)
+            .range(start, start + 999)
+            .execute()
+        )
+        data = batch.data or []
+        rows.extend(data)
+        if len(data) < 1000:
+            break
+        start += 1000
+
+    total_earned = sum(_dec(r["revenue"]) for r in rows)
+
+    bal = (
+        svc.table("artist_balances")
+        .select("total_withdrawn")
+        .eq("user_email", email)
+        .maybe_single()
+        .execute()
+    )
+    total_withdrawn = _dec(bal.data["total_withdrawn"]) if bal.data else Decimal("0")
+
+    pending_res = (
+        svc.table("withdrawal_requests")
+        .select("amount")
+        .eq("user_email", email)
+        .eq("status", "pending")
+        .execute()
+    )
+    pending = sum(_dec(r["amount"]) for r in (pending_res.data or []))
+
+    avail = max(Decimal("0"), total_earned - total_withdrawn - pending)
+
+    svc.table("artist_balances").upsert(
+        {
+            "user_email": email,
+            "total_earned": str(total_earned),
+            "total_withdrawn": str(total_withdrawn),
+            "available_balance": str(avail),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="user_email",
+    ).execute()
+
+    return {
+        "total_earned": _money(total_earned),
+        "total_withdrawn": _money(total_withdrawn),
+        "available_balance": _money(avail),
+    }
+
+
 def get_balance(email: str) -> dict[str, Any]:
     """Return the artist's balance row (defaults to zeros if none / table absent)."""
     default = {"total_earned": Decimal("0"), "total_withdrawn": Decimal("0"),

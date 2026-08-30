@@ -9,11 +9,11 @@ import asyncio
 import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Any
+from typing import Annotated, Any, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
@@ -24,6 +24,7 @@ from app.modules.billing.plans import Plan, get_spec
 from app.modules.billing.service import assign_plan
 from app.modules.home import service as home_service
 from app.modules.home.schemas import HomeContent
+from app.modules.earnings.service import recompute_balance
 from app.modules.profile import service as profile_service
 
 _log = logging.getLogger(__name__)
@@ -932,3 +933,344 @@ async def get_download_url(key: str = Query(...)) -> dict:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not generate download URL: {exc}",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Earnings / song_stats admin CRUD
+# ---------------------------------------------------------------------------
+
+_VALID_MONTHS = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+}
+
+_PLATFORM_GROUP_MAP: dict[str, str] = {
+    "spotify": "Spotify",
+    "apple music": "Apple Music",
+    "youtube": "YouTube",
+    "youtube music": "YouTube",
+    "facebook": "Facebook",
+    "meta": "Facebook",
+    "facebook/meta": "Facebook",
+    "amazon": "Amazon",
+    "amazon music": "Amazon",
+    "jiosaavn": "JioSaavn",
+    "gaana": "Gaana",
+    "tiktok": "TikTok",
+}
+
+
+def _derive_platform_group(platform: str) -> str:
+    return _PLATFORM_GROUP_MAP.get(platform.lower().strip(), "Other")
+
+
+class AdminPlatformEntry(BaseModel):
+    platform: str
+    streams: int = Field(ge=0)
+    revenue: str  # Decimal string — validated server-side
+
+
+class AdminSongStatBulkCreate(BaseModel):
+    user_email: str
+    song_title: str
+    artist_name: str
+    period_month: str
+    period_year: int
+    submission_id: Optional[str] = None
+    entries: List[AdminPlatformEntry]
+
+
+class AdminSongStatUpdate(BaseModel):
+    streams: Optional[int] = Field(None, ge=0)
+    revenue: Optional[str] = None  # Decimal string ≥ 0
+
+
+def _parse_revenue(rev: str) -> Decimal:
+    try:
+        d = Decimal(str(rev))
+        if d < 0:
+            raise ValueError
+        return d
+    except (InvalidOperation, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"revenue must be a non-negative decimal string, got: {rev!r}",
+        ) from exc
+
+
+@router.get("/artist-earnings", dependencies=[Depends(_require_admin)])
+async def get_artist_earnings(
+    email: str = Query(default=""),
+    q: str = Query(default=""),
+) -> dict:
+    """Return all song_stats rows + balance for one artist.
+
+    Pass ?email= for an exact lookup.
+    Pass ?q= to search by artist_name in profiles (returns a match list for the
+    admin to select from, then re-query with ?email=).
+    """
+    svc = get_service_client()
+
+    # Name search mode — return candidate list only.
+    if not email and q:
+        try:
+            res = (
+                svc.table("profiles")
+                .select("user_id,artist_name")
+                .ilike("artist_name", f"%{q}%")
+                .limit(20)
+                .execute()
+            )
+            candidates = []
+            for p in (res.data or []):
+                # Resolve email from auth users via user_id
+                try:
+                    u = svc.auth.admin.get_user_by_id(p["user_id"])
+                    candidates.append({
+                        "email": getattr(u.user, "email", "") or "",
+                        "artist_name": p.get("artist_name") or "",
+                    })
+                except Exception:
+                    pass
+            return {"candidates": candidates}
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                                detail=str(exc)) from exc
+
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Provide ?email= or ?q=")
+
+    email = email.lower().strip()
+
+    # Fetch all song_stats rows including id (admin view).
+    rows: list[dict] = []
+    start = 0
+    try:
+        while True:
+            resp = (
+                svc.table("song_stats")
+                .select("id,user_email,song_title,artist_name,platform,platform_group,"
+                        "period_month,period_year,streams,revenue,submission_id")
+                .eq("user_email", email)
+                .range(start, start + 999)
+                .execute()
+            )
+            batch = resp.data or []
+            rows.extend(batch)
+            if len(batch) < 1000:
+                break
+            start += 1000
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    # Balance row.
+    artist_info: dict[str, Any] = {"email": email, "artist_name": ""}
+    try:
+        bal_res = (
+            svc.table("artist_balances")
+            .select("total_earned,total_withdrawn,available_balance,last_updated")
+            .eq("user_email", email)
+            .maybe_single()
+            .execute()
+        )
+        b = bal_res.data or {}
+        artist_info.update({
+            "total_earned": float(Decimal(str(b.get("total_earned") or 0)).quantize(Decimal("0.01"))),
+            "total_withdrawn": float(Decimal(str(b.get("total_withdrawn") or 0)).quantize(Decimal("0.01"))),
+            "available_balance": float(Decimal(str(b.get("available_balance") or 0)).quantize(Decimal("0.01"))),
+            "last_updated": b.get("last_updated"),
+        })
+    except Exception:
+        artist_info.update({"total_earned": 0, "total_withdrawn": 0,
+                            "available_balance": 0, "last_updated": None})
+
+    # Artist display name — use first song_stats row (already loaded).
+    if rows:
+        artist_info["artist_name"] = rows[0].get("artist_name") or ""
+
+    # Normalise revenue to float for display.
+    for r in rows:
+        r["revenue"] = float(Decimal(str(r.get("revenue") or 0)).quantize(Decimal("0.01")))
+
+    return {"artist": artist_info, "rows": rows}
+
+
+@router.post("/song-stats", dependencies=[Depends(_require_admin)])
+async def admin_add_song_stats(body: AdminSongStatBulkCreate) -> dict:
+    """Bulk-add platform rows for one song × month.
+
+    Uses upsert on the UNIQUE key so re-posting the same data is idempotent
+    (updates streams/revenue instead of raising a duplicate error).
+    """
+    if body.period_month not in _VALID_MONTHS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"period_month must be a full English month name, got: {body.period_month!r}",
+        )
+    current_year = datetime.now(timezone.utc).year
+    if not (1900 <= body.period_year <= current_year + 1):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"period_year out of range: {body.period_year}",
+        )
+    if not body.entries:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="entries must contain at least one platform row",
+        )
+
+    # Validate all revenues before any write.
+    validated_revenues = [_parse_revenue(e.revenue) for e in body.entries]
+
+    email = body.user_email.lower().strip()
+    now = datetime.now(timezone.utc).isoformat()
+
+    rows_to_insert = []
+    for entry, rev in zip(body.entries, validated_revenues):
+        rows_to_insert.append({
+            "user_email": email,
+            "song_title": body.song_title,
+            "artist_name": body.artist_name,
+            "platform": entry.platform,
+            "platform_group": _derive_platform_group(entry.platform),
+            "period_month": body.period_month,
+            "period_year": body.period_year,
+            "streams": entry.streams,
+            "revenue": str(rev),
+            "submission_id": body.submission_id or None,
+            "updated_at": now,
+        })
+
+    svc = get_service_client()
+    try:
+        res = svc.table("song_stats").upsert(
+            rows_to_insert,
+            on_conflict="user_email,song_title,platform,period_month,period_year",
+        ).execute()
+        inserted_rows = res.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    balance = recompute_balance(email)
+    return {"inserted": len(inserted_rows), "rows": inserted_rows, "balance": balance}
+
+
+@router.patch("/song-stats/{row_id}", dependencies=[Depends(_require_admin)])
+async def admin_update_song_stat(row_id: str, body: AdminSongStatUpdate) -> dict:
+    """Update streams and/or revenue on an existing song_stats row.
+
+    Key fields (song_title, platform, period_month, period_year) are immutable
+    via PATCH — delete and re-add to correct them.
+    """
+    svc = get_service_client()
+
+    # Fetch the row first to get user_email for balance recompute.
+    try:
+        existing = (
+            svc.table("song_stats")
+            .select("id,user_email,song_title,artist_name,platform,platform_group,"
+                    "period_month,period_year,streams,revenue,submission_id")
+            .eq("id", row_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    if not existing.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"song_stats row {row_id!r} not found")
+
+    email = existing.data["user_email"]
+    patch: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
+
+    if body.streams is not None:
+        patch["streams"] = body.streams
+    if body.revenue is not None:
+        patch["revenue"] = str(_parse_revenue(body.revenue))
+
+    if len(patch) == 1:  # only updated_at — nothing to change
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="Provide at least one of: streams, revenue")
+
+    try:
+        res = svc.table("song_stats").update(patch).eq("id", row_id).execute()
+        updated_row = (res.data or [existing.data])[0]
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    updated_row["revenue"] = float(
+        Decimal(str(updated_row.get("revenue") or 0)).quantize(Decimal("0.01"))
+    )
+    balance = recompute_balance(email)
+    return {"row": updated_row, "balance": balance}
+
+
+@router.delete("/song-stats/{row_id}", dependencies=[Depends(_require_admin)])
+async def admin_delete_song_stat(row_id: str) -> dict:
+    """Delete a song_stats row and recompute the artist's balance."""
+    svc = get_service_client()
+
+    try:
+        existing = (
+            svc.table("song_stats")
+            .select("user_email")
+            .eq("id", row_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    if not existing.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"song_stats row {row_id!r} not found")
+
+    email = existing.data["user_email"]
+
+    try:
+        svc.table("song_stats").delete().eq("id", row_id).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    balance = recompute_balance(email)
+    return {"deleted": True, "balance": balance}
+
+
+@router.get("/song-stats/submissions/{email}", dependencies=[Depends(_require_admin)])
+async def admin_list_artist_submissions(email: str) -> dict:
+    """Return a lightweight list of an artist's submissions for the Add modal dropdown."""
+    svc = get_service_client()
+    email = email.lower().strip()
+    try:
+        res = (
+            svc.table("submissions")
+            .select("id,type,status,data")
+            .eq("user_email", email)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    submissions = []
+    for r in rows:
+        data = r.get("data") or {}
+        title = (data.get("song_title") or data.get("album_name") or
+                 data.get("song_name") or "")
+        submissions.append({
+            "id": r["id"],
+            "title": title,
+            "type": r.get("type") or "",
+            "status": r.get("status") or "",
+        })
+    return {"submissions": submissions}
