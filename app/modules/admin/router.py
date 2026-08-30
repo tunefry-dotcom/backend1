@@ -601,6 +601,19 @@ class NewArtistUpdateBody(BaseModel):
     apple_music_url: str = ""
 
 
+class AdminCreateUser(BaseModel):
+    email: str
+    password: str
+    full_name: str = ""
+    artist_name: str = ""
+    phone: str = ""
+    plan: str = "free"
+
+
+class AdminSetPassword(BaseModel):
+    password: str
+
+
 class AdminUserUpdate(BaseModel):
     full_name: str | None = None
     artist_name: str | None = None
@@ -691,8 +704,70 @@ async def update_new_artist(entry_id: str, body: NewArtistUpdateBody) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# User edit / delete
+# User create / edit / delete
 # ---------------------------------------------------------------------------
+
+
+def _is_duplicate_email(msg: str) -> bool:
+    m = msg.lower()
+    return any(x in m for x in ("already registered", "already exists", "duplicate", "unique constraint", "already been registered"))
+
+
+@router.post("/users", dependencies=[Depends(_require_admin)], status_code=201)
+async def admin_create_user(body: AdminCreateUser) -> dict:
+    """Create a pre-confirmed user, bypassing email verification."""
+    if not body.email or not body.password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email and password are required")
+    if len(body.password) < 6:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 6 characters")
+
+    svc = get_service_client()
+    try:
+        result = await run_in_threadpool(
+            svc.auth.admin.create_user,
+            {
+                "email": body.email,
+                "password": body.password,
+                "email_confirm": True,
+                "user_metadata": {
+                    k: v for k, v in {
+                        "full_name": body.full_name,
+                        "artist_name": body.artist_name,
+                        "phone": body.phone,
+                    }.items() if v
+                },
+            },
+        )
+    except Exception as exc:
+        msg = str(exc)
+        if _is_duplicate_email(msg):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=msg) from exc
+
+    user = result.user
+    uid = str(user.id)
+
+    # Upsert profile fields (handle_new_user trigger already created the blank row)
+    profile_fields = {k: v for k, v in {
+        "full_name": body.full_name,
+        "artist_name": body.artist_name,
+        "phone": body.phone,
+    }.items() if v}
+    if profile_fields:
+        try:
+            profile_service.upsert_profile(uid, profile_fields)
+        except Exception as exc:
+            _log.warning("Could not upsert profile for admin-created user %s: %s", uid, exc)
+
+    # Assign non-free plan if requested (handle_new_user trigger already made the Free row)
+    if body.plan and body.plan != "free":
+        try:
+            plan_obj = Plan(body.plan)
+            assign_plan(uid, plan_obj)
+        except Exception as exc:
+            _log.warning("Could not assign plan for admin-created user %s: %s", uid, exc)
+
+    return {"created": True, "user_id": uid, "email": body.email}
 
 
 @router.patch("/users/{user_id}", dependencies=[Depends(_require_admin)])
@@ -765,6 +840,30 @@ async def delete_user_endpoint(user_id: str) -> dict:
             detail=f"Could not delete user: {exc}",
         ) from exc
     return {"deleted": True, "user_id": user_id}
+
+
+@router.patch("/users/{user_id}/password", dependencies=[Depends(_require_admin)])
+async def set_user_password(user_id: str, body: AdminSetPassword) -> dict:
+    """Override a user's password — admin only. Plaintext passwords are never
+    stored; this sets a new bcrypt hash via Supabase GoTrue admin API."""
+    if len(body.password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters",
+        )
+    svc = get_service_client()
+    try:
+        await run_in_threadpool(
+            svc.auth.admin.update_user_by_id,
+            user_id,
+            {"password": body.password},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not update password: {exc}",
+        ) from exc
+    return {"updated": True}
 
 
 # ---------------------------------------------------------------------------
