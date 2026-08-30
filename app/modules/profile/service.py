@@ -31,6 +31,7 @@ EDITABLE_FIELDS: tuple[str, ...] = REQUIRED_FIELDS + (
     "apple_music_url",
     "instagram",
     "youtube_url",
+    "custom_label_name",
 )
 
 

@@ -300,6 +300,7 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0006_notifications.sql` | `public.notifications` (id UUID PK, title TEXT, body TEXT, created_at TIMESTAMPTZ); no RLS — read/write via service-role only through API |
 | `0007_backfill_profile_names.sql` | One-time backfill: copies `full_name`/`artist_name`/`phone` from `auth.users.raw_user_meta_data` → `public.profiles` for rows where the column is NULL/empty. COALESCE-safe — never overwrites existing values. Run Step 1 (SELECT) first as dry-run, then Step 2 (UPDATE). |
 | `0008_earnings.sql` | `public.song_stats` (per song × platform-group × month; `revenue NUMERIC(20,10)`; UNIQUE `(user_email, song_title, platform, period_month, period_year)` → monthly upsert is idempotent), `public.artist_balances` (per-user `total_earned`/`total_withdrawn`/`available_balance`, all `NUMERIC(20,10)`), `public.withdrawal_requests` (payout queue; `amount`, `status` ∈ `pending`/`paid`, `method`, `payout_details` JSONB, `snapshot` JSONB). RLS: authenticated read-own by JWT email/uid; service-role writes only. Populated by `migration/ingest_streams.py`. |
+| `0009_custom_label_name.sql` | `profiles.custom_label_name TEXT` — stores the custom label name for Double Artist / Label plan artists. Editable by admin via `PATCH /admin/users/{uid}` and by the artist via `PUT /profile/me` (gated by `CUSTOM_LABEL` entitlement in the frontend). In `EDITABLE_FIELDS` in `profile/service.py`. |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
@@ -465,7 +466,11 @@ One-time scripts to import artists + releases from the legacy SQL Server dump
 | `migrate_users.py` | Creates Supabase auth users + `profiles` + `subscriptions` rows from legacy `Users`/`PaymentDetails` tables |
 | `migrate_releases.py` | Inserts `submissions` rows from legacy `ReleaseDetails` table; requires users already present |
 | `fix_migrated_status.py` | One-time corrector: sets migrated rows to `declined` where `IsActive=0`; idempotent |
-| `ingest_streams.py` | **Monthly** re-runnable ingest of legacy `dbo.MusicStreams` → `public.song_stats` + `public.artist_balances`. Also flips the matched `submissions` row to `approved` (a song with stream data went live — fixes the "Declined" display bug). Idempotent (song_stats UNIQUE-key upsert); upsert/insert-only, never deletes. Dry-run first. See invariants below. |
+| `ingest_streams.py` | **Historically frozen** — one-time ingest of legacy `dbo.MusicStreams` (SQL dump). Do NOT re-run: it rewrites `total_withdrawn` from its own view (tunefry + WithdrawalHistory + paid requests) and would corrupt `withdrawn_baseline.json`'s invariants. See invariants below. |
+| `ingest_royalty_report.py` | **Monthly** ingest of the DSP-consolidated Excel report (`Combined_All` sheet). USD → INR via `fx_rates.json`. Period-replace strategy: deletes existing `song_stats` for covered months (per matched user) then re-inserts — fully idempotent. Recomputes `artist_balances` from full song_stats table + `withdrawn_baseline.json` + current paid/pending. Default is **dry-run**; requires `--live` to write. Full runbook: [`MONTHLY_ROYALTY_INGESTION.md`](migration/MONTHLY_ROYALTY_INGESTION.md). |
+| `compute_withdrawn_baseline.py` | **One-time** capture of each artist's legacy withdrawn (tunefry + WithdrawalHistory) into `withdrawn_baseline.json`. Uses `processed_at ≤ artist_balances.last_updated + 1 min` to identify paid requests already reflected in `total_withdrawn`; refuses to write on deficit rows without `--force`. Read-only against Supabase. |
+| `platform_map.py` | Shared normalization for both ingest scripts. `raw source_platform` → `(canonical_name, platform_group)`. **Group must be one of** `Spotify`, `Apple Music`, `YouTube`, `Facebook`, `Amazon`, `JioSaavn`, `Gaana`, `TikTok`, `Other` — the frontend Stats > Platform chart groups on this exact set. |
+| `legacy_artist_stats.py` | **Read-only, standalone** — no Supabase/env dependency. Given `--artist "<name>"` (+ optional `--month`/`--year` pair, `--user-id` to disambiguate, `--json`), parses `dbo.Users` / `dbo.MusicStreams` / `dbo.WithdrawalHistory` straight from the raw dump and reports combined all-platform stats, per-song breakdown, monthly breakdown, and **remaining available balance** = `Σ(Revenue − RedeemedAmount)` over the matched rows — a derivation not exposed anywhere else, since `RedeemedAmount` is a per-row withdrawal-allocation marker, not `round(Revenue, 2)`. Join key `Users`→`MusicStreams.ArtistName` is ambiguous (tries `Username`/`FullName`/`ArtistName` against actual distinct values in `MusicStreams`); on multiple `Users` matches it lists candidates and exits rather than guessing. Invoked via the `/legacy-artist-stats` skill (`.claude/skills/legacy-artist-stats/SKILL.md`). |
 
 ### Key invariants
 
@@ -484,7 +489,22 @@ One-time scripts to import artists + releases from the legacy SQL Server dump
 - **`plan_confirmed`** — set to `True` for any paid plan subscription row written by
   `migrate_users.py`; required for the app to surface non-free plans.
 
-### `ingest_streams.py` invariants (earnings — money-critical)
+### `ingest_royalty_report.py` invariants (earnings — money-critical, active monthly script)
+
+- **Attribution (6-tier priority)** — (1) Legacy ISRC map (`migration/legacy_map.json`); (2) **Supabase ISRC-only** — an ISRC that unambiguously belongs to a single Supabase submission owner (derived from `isrc_to_sub` with a >1-email drop); (3) Supabase (email, ISRC) → submission_id match (requires artist candidate to resolve first); (4) normalized `artist` / `sub_label` → email from `public.profiles.artist_name` + `auth.users.user_metadata` + legacy name maps (`legacy_map.json` artist_name / full_name / username); (5) Legacy `(artist‖title)` fallback from `legacy_map.json`; (6) **Supabase title-only** — the report's normalized song title unambiguously belongs to a single Supabase submission owner (derived from `title_to_sub` with a >1-email drop). Multi-artist rows (double-space, comma, "feat"/"ft"/"x"/"&"/"and") are split into candidates. Names/ISRCs/titles mapping to more than one email are **dropped** (never guess). Every run prints per-tier row counts + INR + distinct users so the operator can review new-tier attributions before `--live`. Unmatched artists → `unmatched_YYYYMMDD_HHMM.csv` next to the workbook (columns: `artist, sub_label, row_count, total_royalty_usd, total_royalty_inr, total_streams` — sorted by INR in INR-workbook mode, by USD otherwise).
+- **`submission_id` linkage** — (email, ISRC) map from `submissions.data->>isrc` / `data->>isrc_code` / `data->'songs'[N]->>isrc`. Fallback: (email, normalized song_title). If neither matches, `submission_id` is NULL and the per-song modal shows empty for that song.
+- **Workbook format auto-detected** — script checks for `royalty_inr` column in the first 100 rows. If present: **INR workbook** (`Royalty_Reports_*_INR.xlsx`) — uses `royalty_inr` directly, no FX applied, FX guard skipped. If absent: **USD workbook** (`Royalty_Detail_Reports_*.xlsx`) — uses `royalty` column × `fx_rates.json["YYYY-MM"]`; script **refuses to run** if any period lacks an FX entry. Plan royalty % is NOT applied in either mode.
+- **Apple Music INR CSV (`--csv PATH`)** — Optional supplementary source. Columns: `item_artist`, `song_name`, `total` (streams), `royality` (net INR — no FX applied). Platform fixed to `Apple Music`. Period auto-detected from `_MM_YYYY_` filename pattern; override with `--csv-period YYYY-MM`. CSV data **fully replaces** xlsx Apple Music rows for the same period (prevents double-counting).
+- **Reconciliation cap (`--expected-net AMOUNT`)** — After aggregation the script checks `total_to_write_inr ≤ expected_net`. If breached: **aborts before any live write**. In dry-run: warns. Also accepts `--expected-gross` for an informational diff.
+- **`Dispute Resolution` rows are EXCLUDED** — `adjustment_type == "Dispute Resolution"` rows skipped entirely.
+- **`song_stats.period_month` MUST be the full English month name** (`"February"`, not `"02"` or `"Feb"`) — required by the frontend `_MONTH_ORDER` chart map in `app/modules/earnings/service.py`.
+- **`platform_group` MUST match the frontend's exact set** (see `platform_map.py`). Facebook / Meta → `Facebook` (so Overview UGC toggle works). Snap → `Other`.
+- **Period-replace write strategy** — for each user with rows in the file, `DELETE` existing `song_stats` for covered (period_month, period_year) tuples, then INSERT fresh rows. Fully idempotent. Older periods never touched. If `--csv` covers a period not in xlsx, a platform-scoped delete (`platform='Apple Music'`) runs instead.
+- **Balance formula** — `total_withdrawn = withdrawn_baseline.json[email] + Σ(withdrawal_requests.paid)`; `available_balance = max(0, total_earned − total_withdrawn − Σ(pending))`. `total_earned` recomputed from the FULL `song_stats` table each run.
+- **`withdrawn_baseline.json` is IMMUTABLE** — one-time snapshot of each artist's legacy withdrawn. If regenerated after live runs, double-counts paid requests. If lost: restore from git, do NOT regenerate.
+- **Dry-run is the default** — `--live` flag required for actual writes. Every run produces `unmatched_*.csv` regardless of mode.
+
+### `ingest_streams.py` invariants (historically frozen — do NOT re-run)
 
 - **Attribution** — a `MusicStreams` row maps to a user via `(ArtistName, Song)` →
   `ReleaseDetails.(Artist, Song|SongTitle)` → `ReleaseID` → the migrated `submissions`
@@ -515,7 +535,14 @@ incident (no backup on free Supabase plan). Always dry-run first:
 ```bash
 python migration/migrate_users.py "<dump.sql>" --dry-run
 python migration/migrate_releases.py "<dump.sql>" --dry-run
-python migration/ingest_streams.py "<dump.sql>" --dry-run
+# ingest_streams.py is FROZEN — do NOT re-run. Historical only.
+# Monthly earnings ingest — dry-run is the default:
+python migration/ingest_royalty_report.py "migration/reports/YYYY-MM.xlsx" \
+    --fx-rates migration/fx_rates.json \
+    --csv "migration/reports/applemusic_process_MM_YYYY_detail_report.csv" \
+    --expected-net 126361.52
+# Add --live once dry-run is reviewed. Full runbook:
+#   migration/MONTHLY_ROYALTY_INGESTION.md
 ```
 
 ## Deploy

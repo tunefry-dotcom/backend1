@@ -123,7 +123,7 @@ async def list_users(q: str = Query(default="")) -> dict:
         )
         all_profiles = _fetch_all_rows(
             svc, "profiles",
-            "user_id,full_name,artist_name,phone,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth",
+            "user_id,full_name,artist_name,phone,spotify_url,apple_music_url,instagram,youtube_url,city,state,bio,gender,date_of_birth,custom_label_name",
         )
     except Exception as exc:
         raise HTTPException(
@@ -174,6 +174,7 @@ async def list_users(q: str = Query(default="")) -> dict:
                 "bio": prof.get("bio") or "",
                 "gender": prof.get("gender") or "",
                 "date_of_birth": prof.get("date_of_birth") or "",
+                "custom_label_name": prof.get("custom_label_name") or "",
             }
         )
 
@@ -613,6 +614,7 @@ class AdminUserUpdate(BaseModel):
     apple_music_url: str | None = None
     instagram: str | None = None
     youtube_url: str | None = None
+    custom_label_name: str | None = None
     plan: str | None = None
 
 
