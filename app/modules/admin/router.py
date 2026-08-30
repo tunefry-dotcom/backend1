@@ -432,6 +432,29 @@ def _age_from_dob(dob: Any) -> int | None:
     return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
 
 
+def _parse_expires_at(value: str) -> str | None:
+    """Convert admin-supplied date string to a UTC end-of-day ISO timestamp.
+
+    ""           → None  (store NULL — plan never expires)
+    "YYYY-MM-DD" → "YYYY-MM-DDT23:59:59+00:00"
+
+    End-of-day storage ensures effective_plan()'s ``expires_at <= now()`` check
+    does not expire the plan at 00:00:00 UTC on the chosen day — the plan stays
+    active through the full calendar day.
+    """
+    if not value:
+        return None
+    try:
+        d = date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"expires_at must be YYYY-MM-DD or empty string, got: {value!r}",
+        )
+    eod = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+    return eod.isoformat()
+
+
 @router.get("/withdrawals", dependencies=[Depends(_require_admin)])
 async def list_withdrawals() -> dict:
     """All withdrawal requests, pending first then newest — with the artist
@@ -629,6 +652,7 @@ class AdminUserUpdate(BaseModel):
     youtube_url: str | None = None
     custom_label_name: str | None = None
     plan: str | None = None
+    expires_at: str | None = None  # "YYYY-MM-DD" to set; "" to clear to NULL; None = no change
 
 
 @router.get("/new-artist-queue", dependencies=[Depends(_require_admin)])
@@ -774,6 +798,8 @@ async def admin_create_user(body: AdminCreateUser) -> dict:
 async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
     svc = get_service_client()
     plan_changed: Plan | None = None
+    new_expiry: str | None = None
+    expires_at_updated = False
     try:
         # 1. Validate + apply plan change first (before touching profile/meta)
         if body.plan is not None:
@@ -786,14 +812,31 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
                 )
             assign_plan(user_id, plan_changed)
 
-        # 2. Upsert ALL profile fields into the profiles table.
+        # 2. Apply explicit expires_at override — runs AFTER assign_plan so it wins
+        #    when both fields arrive in the same request (assign_plan always sets
+        #    now+365 for paid plans; this overwrites that default).
+        #    None   = field absent → skip entirely (no subscriptions write)
+        #    ""     = clear to NULL (plan never expires — complimentary)
+        #    "YYYY-MM-DD" = store as end-of-day UTC
+        if body.expires_at is not None:
+            new_expiry = _parse_expires_at(body.expires_at)
+            (
+                svc.table("subscriptions")
+                .update({"expires_at": new_expiry})
+                .eq("user_id", user_id)
+                .execute()
+            )
+            expires_at_updated = True
+
+        # 3. Upsert ALL profile fields into the profiles table.
         # This includes full_name/artist_name/phone — profiles is the authoritative
         # store; auth.user_metadata is synced separately as a best-effort step.
         # Skip None and "" — Postgres date columns reject empty strings,
         # and we don't want to clear fields the admin left blank.
+        # Exclude plan and expires_at — both belong to subscriptions, not profiles.
         profile_fields = {
             k: v for k, v in body.model_dump().items()
-            if k != "plan"
+            if k not in ("plan", "expires_at")
             and v is not None
             and v != ""
         }
@@ -826,6 +869,8 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
         spec = get_spec(plan_changed)
         result["plan"] = plan_changed.value
         result["plan_name"] = spec.name
+    if expires_at_updated:
+        result["expires_at"] = new_expiry  # None when cleared, ISO string when set
     return result
 
 
