@@ -241,7 +241,8 @@ async def list_submissions(
 ) -> dict:
     """Paginated submissions for a category.
 
-    Sorted: pending first (status DESC: p > d > a), then created_at DESC.
+    Sorted by created_at DESC only — status never affects ordering, so a
+    card's position stays stable across approve/decline and reload.
     """
     types = _CATEGORY_TYPES.get(category)
     if not types:
@@ -254,7 +255,6 @@ async def list_submissions(
             svc.table("submissions")
             .select("*")
             .in_("submission_type", types)
-            .order("status", desc=True)          # pending > declined > approved
             .order("created_at", desc=True)
             .execute()
         )
