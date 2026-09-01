@@ -241,6 +241,12 @@ def get_earnings_summary(email: str) -> dict[str, Any]:
         key=lambda x: x["streams"], reverse=True,
     )
 
+    # Fold in referral commissions so this headline figure stays consistent
+    # with artist_balances.total_earned (which already includes them via
+    # recompute_balance) — otherwise available_balance and total_revenue
+    # would disagree on the same dashboard.
+    total_revenue += _sum_referral_earnings(get_service_client(), email)
+
     balance = get_balance(email)
     return {
         "total_streams": total_streams,
