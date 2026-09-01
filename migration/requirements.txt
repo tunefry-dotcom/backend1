@@ -1,3 +1,4 @@
 # Migration script dependencies (already in repo venv via requirements.txt)
 supabase>=2.7
 python-dotenv
+openpyxl>=3.1  # ingest_royalty_report.py — reads DSP-consolidated Excel workbook

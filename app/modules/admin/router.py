@@ -26,6 +26,7 @@ from app.modules.home import service as home_service
 from app.modules.home.schemas import HomeContent
 from app.modules.earnings.service import recompute_balance
 from app.modules.profile import service as profile_service
+from app.modules.referrals.service import credit_referral
 
 _log = logging.getLogger(__name__)
 
@@ -788,6 +789,8 @@ async def admin_create_user(body: AdminCreateUser) -> dict:
         try:
             plan_obj = Plan(body.plan)
             assign_plan(uid, plan_obj)
+            # This is the user's first-ever plan grant — inherently a new activation.
+            credit_referral(referred_user_id=uid, plan=plan_obj, source="admin")
         except Exception as exc:
             _log.warning("Could not assign plan for admin-created user %s: %s", uid, exc)
 
@@ -810,7 +813,18 @@ async def update_user(user_id: str, body: AdminUserUpdate) -> dict:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid plan '{body.plan}'. Valid values: {[p.value for p in Plan]}",
                 )
+            # Snapshot the plan BEFORE overwriting it, so we only credit a referral
+            # commission on a genuine change — an admin resaving unrelated profile
+            # fields still sends the same `plan` value and must not double-credit.
+            prev = (
+                svc.table("subscriptions").select("plan").eq("user_id", user_id).limit(1).execute()
+            )
+            prev_rows = prev.data or []
+            prev_plan = prev_rows[0].get("plan") if prev_rows else None
+
             assign_plan(user_id, plan_changed)
+            if prev_plan != plan_changed.value:
+                credit_referral(referred_user_id=user_id, plan=plan_changed, source="admin")
 
         # 2. Apply explicit expires_at override — runs AFTER assign_plan so it wins
         #    when both fields arrive in the same request (assign_plan always sets

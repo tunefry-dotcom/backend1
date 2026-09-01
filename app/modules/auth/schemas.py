@@ -7,6 +7,7 @@ class SignUpRequest(BaseModel):
     phone: str
     email: EmailStr
     password: str
+    referral_code: str | None = None
 
     @field_validator("full_name")
     @classmethod

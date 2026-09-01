@@ -40,6 +40,7 @@ from app.modules.auth.schemas import (
     ResetPasswordRequest,
     SignUpRequest,
 )
+from app.modules.referrals import service as referrals_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 templates = Jinja2Templates(directory="templates")
@@ -104,6 +105,16 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
 
     # Plan assignment is a database invariant: the `handle_new_user` trigger on
     # auth.users auto-creates a Free subscription row for every new user. Nothing here.
+
+    # 1b. Resolve + record the referral, if a code was supplied. Best-effort —
+    # a bad/unknown code or a self-referral must never block signup.
+    if body.referral_code:
+        try:
+            referrer_id = referrals_service.resolve_referrer(body.referral_code)
+            if referrer_id and referrer_id != str(user.id):
+                referrals_service.record_referral(referrer_id, str(user.id), body.referral_code)
+        except Exception as exc:
+            _log.warning("Referral resolution failed for code %r: %s", body.referral_code, exc)
 
     # 2. Generate the confirmation token (no email sent by Supabase).
     try:

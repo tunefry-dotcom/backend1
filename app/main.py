@@ -18,6 +18,7 @@ from app.modules.home.router import router as home_router
 from app.modules.media.router import router as media_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.profile.router import router as profile_router
+from app.modules.referrals.router import router as referrals_router
 from app.modules.submissions.router import router as submissions_router
 
 
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(media_router)
     app.include_router(notifications_router)
     app.include_router(profile_router)
+    app.include_router(referrals_router)
     app.include_router(submissions_router)
 
     @app.get("/health", tags=["health"])

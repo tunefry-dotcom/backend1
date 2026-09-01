@@ -37,6 +37,33 @@ uvicorn app.main:app --reload
 - Swagger docs: `http://localhost:8000/docs`
 - Health: `GET /health`
 
+## Tests
+
+`tests/` — stdlib `unittest` (no pytest dependency added). Everything runs
+fully offline: the Supabase client is faked via `tests/fakes.py` (a minimal
+fluent query-builder stand-in — `table().select().eq()...execute()` chains,
+plus `auth.admin.get_user_by_id`), and FastAPI's `TestClient` (already
+available via `fastapi`/`starlette`, no extra install) exercises endpoints
+with `app.dependency_overrides` swapping in a fake `CurrentUser` for
+`get_current_user`. There is **no live Supabase project or seeded test DB** —
+these are logic-level unit/endpoint-contract tests, not full integration
+tests against real Postgres.
+
+```bash
+.\venv\Scripts\activate
+python -m unittest discover -s tests -v
+```
+
+Currently covers the Refer & Earn feature end-to-end at the logic level:
+referral-code generation/resolution, `credit_referral`'s 10% commission math
+and its no-op paths (no referral, free plan, missing referrer email, DB
+errors always swallowed — never raised into the caller), `recompute_balance`
+folding `referral_earnings` into the existing wallet (including graceful
+degradation when migration 0010 hasn't been applied yet), the
+`GET /referrals/me` contract, and the `SignUpRequest.referral_code` optional
+field. When adding a new module, prefer extending `tests/fakes.py` over
+mocking `get_service_client` ad hoc in each test file.
+
 ## Backend structure
 
 ```
@@ -77,6 +104,9 @@ app/
       router.py               # /earnings/* + /withdrawals (artist earnings + payouts)
       service.py              # song_stats/artist_balances reads; create_withdrawal (zeroes balance)
       schemas.py              # WithdrawalRequestBody
+    referrals/
+      service.py              # referral_code gen, resolve_referrer, credit_referral (10% commission)
+      router.py               # GET /referrals/me
     admin/
       router.py               # /admin/* (X-Admin-Secret header required)
 templates/
@@ -94,10 +124,11 @@ Path: `C:\Users\ViditVaibhav\Desktop\tunefry frontend`
 src/
   context/AuthContext.jsx     # global user state; fetches /auth/me + /billing/me in parallel
   lib/
-    auth.js                   # login, signup, logout, getCurrentUser
+    auth.js                   # login, signup(..., referralCode), logout, getCurrentUser
     billing.js                # FEATURES enum, canAccess(), fetchPlans(), changePlan()
     payment.js                # Razorpay order + verify flow; ProfileIncompleteError
     profile.js                # getProfile(), updateProfile()
+    referrals.js              # getMyReferrals() -> GET /referrals/me
     r2upload.js               # validates file type/dimensions; calls /api/upload/r2
   components/
     ProtectedRoute.jsx        # spinner while loading; redirects unauthenticated
@@ -259,6 +290,35 @@ browser (not just Safari). Full write-up in `docs/auth-crosssite-cookie-fix.md`.
 | GET | `/withdrawals/me` | Protected — the user's own withdrawal request history |
 | POST | `/withdrawals` | Protected — creates a **full-balance** payout request. Amount is server-derived from `artist_balances` (never trusts client), must be ≥ ₹1500; snapshots artist plan/name/city/state/age-from-DOB + `payout_details` (UPI or bank); on success **zeroes** `available_balance`. 400 if below the minimum. Admin later marks it paid or deletes it |
 
+### Refer & Earn
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/referrals/me` | Protected — `{referral_code, referred_count, referrals: [{email, plan, joined_at}], total_referral_earned}`. Referral code is lazily generated + persisted to `profiles.referral_code` on first call (no backfill needed for pre-existing users). |
+
+**Referral commission model**: each user has a deterministic referral code
+(`"TF" + user_id.hex[:8].upper()` — pure string derivation, no randomness, no
+external calls, no collision-checking needed). A signup with `referral_code`
+set (`SignUpRequest.referral_code`, optional) records a `public.referrals`
+row (migration 0010) linking referrer → referred user; a bad/unknown code
+never blocks signup. Whenever the referred user's plan activates, the
+referrer gets **10% of that plan's price**, credited to their *existing*
+`artist_balances.available_balance` (via `earnings.service.recompute_balance`,
+which now also sums `referral_earnings` — migration 0010's immutable audit
+ledger — alongside `song_stats`). This repeats on every future purchase, not
+just the first. `referrals.service.credit_referral(...)` is called explicitly
+from three sites (NOT baked into `billing.service.assign_plan`, which stays a
+pure persistence function):
+- `billing/router.py` `verify_payment_and_upgrade` — always credits; the
+  existing replay-protection check guarantees every call here is a genuinely
+  new payment.
+- `admin/router.py` `admin_create_user` — always credits (first plan grant).
+- `admin/router.py` `update_user` (`PATCH /admin/users/{uid}`) — credits
+  **only if** the requested plan differs from the subscription row's plan
+  *before* the call, so an admin resaving unrelated profile fields (which
+  still sends the same `plan` value) can't double-credit.
+- **`POST /billing/change-plan` (dev-only QA endpoint) deliberately never
+  credits** — it must never fabricate wallet balance during testing.
+
 ## Plans / entitlements
 
 | Plan | Price | Royalty | Max Releases | Max Artists | Notable features |
@@ -303,6 +363,7 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0007_backfill_profile_names.sql` | One-time backfill: copies `full_name`/`artist_name`/`phone` from `auth.users.raw_user_meta_data` → `public.profiles` for rows where the column is NULL/empty. COALESCE-safe — never overwrites existing values. Run Step 1 (SELECT) first as dry-run, then Step 2 (UPDATE). |
 | `0008_earnings.sql` | `public.song_stats` (per song × platform-group × month; `revenue NUMERIC(20,10)`; UNIQUE `(user_email, song_title, platform, period_month, period_year)` → monthly upsert is idempotent), `public.artist_balances` (per-user `total_earned`/`total_withdrawn`/`available_balance`, all `NUMERIC(20,10)`), `public.withdrawal_requests` (payout queue; `amount`, `status` ∈ `pending`/`paid`, `method`, `payout_details` JSONB, `snapshot` JSONB). RLS: authenticated read-own by JWT email/uid; service-role writes only. Populated by `migration/ingest_streams.py`. |
 | `0009_custom_label_name.sql` | `profiles.custom_label_name TEXT` — stores the custom label name for Double Artist / Label plan artists. Editable by admin via `PATCH /admin/users/{uid}` and by the artist via `PUT /profile/me` (gated by `CUSTOM_LABEL` entitlement in the frontend). In `EDITABLE_FIELDS` in `profile/service.py`. |
+| `0010_referrals.sql` | `profiles.referral_code TEXT UNIQUE` (lazily populated, not backfilled), `public.referrals` (referrer_user_id, referred_user_id UNIQUE, referral_code_used), `public.referral_earnings` (immutable audit ledger: referrer_user_id/email, referred_user_id, plan, amount, source, payment_ref). See "Refer & Earn" under Endpoints for the crediting model. |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
@@ -558,12 +619,19 @@ python migration/ingest_royalty_report.py "migration/reports/YYYY-MM.xlsx" \
 
 ## Claude Code hooks (`.claude/`)
 
-Three hooks wired in `.claude/settings.json` that fire automatically during Claude Code sessions:
+Hooks wired in `.claude/settings.json` that fire automatically during Claude Code sessions:
 
 | Hook | File | Fires on | What it does |
 |------|------|----------|-------------|
 | PreToolUse | `pre-safety-hook.sh` | Every `Bash` + every `Edit`/`Write` (90 s cooldown) | Emits production-safety reminder. **Always** fires on `git push` (push = Render deploy) and on dangerous Bash patterns (Supabase writes, migration scripts). |
+| PreToolUse | `plan-mode-hook.sh` | `EnterPlanMode` | Injects a senior-SDE/architect review protocol; Claude must output a `PLAN SCORE: XX/100` (re-scoring until ≥85) before calling `ExitPlanMode`. |
+| PreToolUse | `dep-guard-hook.sh` | `Bash` running `git commit`/`git push` | Blocks (via `permissionDecision: ask`) when staged dependency files (`requirements*.txt`, `pyproject.toml`, etc.) touch a critical package (fastapi, starlette, supabase, gotrue, postgrest, boto3, httpx, pyjwt/python-jose, pydantic, uvicorn) — surfaces the exact diff lines before approval. |
+| PreToolUse | `push-gate-hook.sh` | `Bash` running `git push` | Always requires explicit approval before push. If `DIAL_API_KEY` env var is set, calls EPAM Dial AI to classify the push HIGH/LOW stakes and summarize it; otherwise fail-opens to a neutral LOW classification (no hardcoded secret in the script — this file is git-tracked). Any `supabase/migrations/*.sql` file in the push forces HIGH stakes (manual-run migrations, not auto-applied). |
+| PreToolUse | `frontend-integration-hook.sh` | `Edit`/`Write` on a path containing `tunefry frontend` | Reminds about this repo's actual frontend conventions (service modules in `src/lib/*.js`, `API_BASE` from `src/lib/config.js`, cookie-based `credentials: include`, `AuthContext.jsx`, `PlanGate`) before editing sibling-repo frontend files. |
+| PreToolUse | `frontend-design-hook.sh` | `Edit`/`Write` on `.jsx`/`.css` under a path containing `tunefry frontend` | Design-quality checklist (bold aesthetic direction, no AI-slop defaults, distinctive typography) — companion to `frontend-integration-hook.sh`. |
 | PostToolUse | `review-hook.sh` | Every `Edit`/`Write` | **Phase 3 (CLAUDE.md sync) always fires.** Phases 0–2 (full review + scoring) have a 30 s cooldown to avoid spam on rapid multi-file edits — during cooldown a lightweight Phase 3-only reminder is emitted instead. |
 | PostToolUse | `post-data-safety-hook.sh` | Every `Edit`/`Write` (no cooldown) | Targeted safety checklist based on file type: migration SQL → idempotency/blast-radius; dependency files → no-downgrade guard; app source → regression/contract check. |
 
 **Key gotcha**: hooks run via `bash`, so they require Git Bash on Windows (already present). The cooldown files live in `/tmp/` — they reset on reboot or WSL restart, which is fine (just means the first edit after restart always triggers the full reminder).
+
+**`push-gate-hook.sh` / `dep-guard-hook.sh` / `plan-mode-hook.sh` / `frontend-*-hook.sh` ported from the SCDM project (2026-09-01)** — adapted for this repo's stack (FastAPI/Supabase/R2, not Alembic/Celery) and this repo's sibling-repo frontend layout (`tunefry frontend`, not a `frontend/` subfolder). The original SCDM `push-gate-hook.sh` had a live EPAM Dial API key hardcoded; this repo's copy never hardcodes it — `push-gate-hook.sh` reads `DIAL_API_KEY` from the environment, and additionally sources `.claude/push-gate.local.sh` if present (gitignored — see `.gitignore`) to set it. The actual key lives only in that local file, never in a git-tracked one. Without any key configured, the hook still gates every push behind approval, just without the AI-generated stakes summary.

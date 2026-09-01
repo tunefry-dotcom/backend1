@@ -61,12 +61,27 @@ def _fetch_song_stats(email: str) -> list[dict[str, Any]]:
     return rows
 
 
-def recompute_balance(email: str) -> dict[str, Any]:
-    """Recompute artist_balances from scratch after any admin song_stats mutation.
+def _sum_referral_earnings(svc: Any, email: str) -> Decimal:
+    """Sum public.referral_earnings for this email (0 if the table doesn't exist yet)."""
+    try:
+        res = (
+            svc.table("referral_earnings")
+            .select("amount")
+            .eq("referrer_email", email)
+            .execute()
+        )
+        return sum((_dec(r["amount"]) for r in (res.data or [])), Decimal("0"))
+    except Exception:
+        return Decimal("0")
 
-    Sums total_earned from all song_stats rows, preserves total_withdrawn
-    (encodes withdrawn_baseline.json + paid requests — cannot be re-derived here),
-    then subtracts pending withdrawal requests for available_balance.
+
+def recompute_balance(email: str) -> dict[str, Any]:
+    """Recompute artist_balances from scratch after any song_stats/referral mutation.
+
+    Sums total_earned from all song_stats rows plus any referral commissions
+    credited to this email (migration 0010), preserves total_withdrawn (encodes
+    withdrawn_baseline.json + paid requests — cannot be re-derived here), then
+    subtracts pending withdrawal requests for available_balance.
     """
     svc = get_service_client()
 
@@ -86,7 +101,7 @@ def recompute_balance(email: str) -> dict[str, Any]:
             break
         start += 1000
 
-    total_earned = sum(_dec(r["revenue"]) for r in rows)
+    total_earned = sum((_dec(r["revenue"]) for r in rows), Decimal("0")) + _sum_referral_earnings(svc, email)
 
     bal = (
         svc.table("artist_balances")

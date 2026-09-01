@@ -50,6 +50,7 @@ from app.modules.billing.service import (
     lifecycle,
 )
 from app.modules.profile import service as profile_service
+from app.modules.referrals.service import credit_referral
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -271,6 +272,16 @@ async def verify_payment_and_upgrade(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Payment verified but plan assignment failed: {exc}",
         )
+
+    # Referral commission: this point is only reached after replay protection
+    # confirms a genuinely new payment, so every call here is a fresh "purchase" —
+    # covers repeat/renewal buys too, not just the first.
+    credit_referral(
+        referred_user_id=current_user.id,
+        plan=body.plan,
+        source="payment",
+        payment_ref=body.razorpay_payment_id,
+    )
 
     _refresh_session(response, refresh_token)
     return _my_plan_response(body.plan, row)

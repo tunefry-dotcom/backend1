@@ -29,6 +29,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.core.supabase_client import get_service_client
+from migration.migrate_releases import iter_insert_statements
 
 # ── Plan mapping: old LabelPlans.Id → new Plan slug ──────────────────────────
 
@@ -159,10 +160,6 @@ def parse_dump(filepath: str) -> tuple[dict, dict, dict]:
     print(f"Reading: {filepath}", flush=True)
     raw = Path(filepath).read_bytes()
     text = raw.decode("utf-16-le", errors="ignore")
-    # Split on newlines directly — no join needed. The 65 Users rows with embedded
-    # newlines in nvarchar(max) fields will produce short token lists and be skipped;
-    # this is acceptable (32 users miss some profile fields but ARE still created).
-    # Joining caused O(n²) string-concat on ErrorLog's 14k stack-trace rows — fatal.
     lines = text.split("\n")
     print(f"  Lines: {len(lines):,}")
 
@@ -171,39 +168,47 @@ def parse_dump(filepath: str) -> tuple[dict, dict, dict]:
     releases: dict[int, list] = {}
     uc = pc = rc = 0
 
+    # Users: reassemble rows split across physical lines by embedded newlines in
+    # nvarchar(max) fields (e.g. a multi-line bio). Previously these ~65 rows
+    # yielded short token lists and were silently dropped — losing the user AND,
+    # downstream, every release they owned. iter_insert_statements only joins
+    # matching rows, so ErrorLog's 14k stack-trace lines are never accumulated
+    # (the O(n²) concat the old single-line parser was avoiding).
+    for stmt in iter_insert_statements(lines, "INSERT [DBO].[USERS]"):
+        tok = _tokenize(stmt)
+        if len(tok) <= U_ARTIST:
+            continue
+        try:
+            uid = int(tok[U_ID])
+        except (TypeError, ValueError):
+            continue
+        users[uid] = {
+            "password":        tok[U_PASSWORD],
+            "email":           tok[U_EMAIL],
+            "full_name":       tok[U_FULLNAME],
+            "registration_dt": tok[U_REGDATE],
+            "contact":         tok[U_CONTACT],
+            "city":            tok[U_CITY],
+            "spotify_url":     tok[U_SPOTIFY],
+            "apple_music_url": tok[U_APPLE],
+            "youtube_url":     tok[U_YOUTUBE],
+            "instagram":       tok[U_INSTAGRAM],
+            "dob":             tok[U_DOB],
+            "bio":             tok[U_BIO],
+            "whatsappno":      tok[U_WHATSAPP],
+            "state":           tok[U_STATE],
+            "artist_name":     tok[U_ARTIST],
+        }
+        uc += 1
+
+    # Payments + Releases are single-line reliable (no free-text nvarchar(max)
+    # that users type newlines into), so a plain line scan is enough.
     for line in lines:
         line = line.strip()
         if "INSERT" not in line or "VALUES" not in line:
             continue
 
-        if "[dbo].[Users]" in line:
-            tok = _tokenize(line)
-            if len(tok) <= U_ARTIST:
-                continue
-            try:
-                uid = int(tok[U_ID])
-            except (TypeError, ValueError):
-                continue
-            users[uid] = {
-                "password":        tok[U_PASSWORD],
-                "email":           tok[U_EMAIL],
-                "full_name":       tok[U_FULLNAME],
-                "registration_dt": tok[U_REGDATE],
-                "contact":         tok[U_CONTACT],
-                "city":            tok[U_CITY],
-                "spotify_url":     tok[U_SPOTIFY],
-                "apple_music_url": tok[U_APPLE],
-                "youtube_url":     tok[U_YOUTUBE],
-                "instagram":       tok[U_INSTAGRAM],
-                "dob":             tok[U_DOB],
-                "bio":             tok[U_BIO],
-                "whatsappno":      tok[U_WHATSAPP],
-                "state":           tok[U_STATE],
-                "artist_name":     tok[U_ARTIST],
-            }
-            uc += 1
-
-        elif "[dbo].[PaymentDetails]" in line:
+        if "[dbo].[PaymentDetails]" in line:
             tok = _tokenize(line)
             if len(tok) <= P_ISACTIVE:
                 continue
@@ -348,11 +353,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Migrate old Tunefry users to Supabase.")
     ap.add_argument("sql_file", help="Path to UTF-16 LE SQL dump")
     ap.add_argument("--dry-run", action="store_true", help="No Supabase writes")
+    ap.add_argument(
+        "--update-existing", action="store_true",
+        help="DANGER: also overwrite profiles + subscriptions of users that "
+             "already exist in Supabase with legacy dump values. Default is OFF "
+             "— existing users are left untouched and only missing users are "
+             "created. Only pass this for a first-time full import.",
+    )
     args = ap.parse_args()
 
     dry = args.dry_run
+    update_existing = args.update_existing
     if dry:
         print("=== DRY RUN — no Supabase writes ===\n")
+    print(f"Mode: {'UPDATE existing users' if update_existing else 'create MISSING users only (existing left untouched)'}\n")
 
     users, payments, releases = parse_dump(args.sql_file)
 
@@ -418,6 +432,13 @@ def main() -> None:
                                  "expires_at": "", "error": "password_too_short"})
                 continue
 
+            # SAFETY: never touch users that already exist unless explicitly
+            # asked to. Overwriting their profile/subscription with legacy dump
+            # values would clobber changes made on the new platform.
+            if (not dry) and (not update_existing) and email.lower() in existing:
+                counts["skipped"] += 1
+                continue
+
             sub     = resolve_sub(uid, user, payments, releases)
             profile = build_profile(user)
 
@@ -471,6 +492,10 @@ def main() -> None:
                     "plan":    sub["plan"],
                     "status":  sub["status"],
                 }
+                # Paid plans must be confirmed so the app surfaces them (matches
+                # the 0005 backfill + assign_plan). Free left to the column default.
+                if sub["plan"] != "free":
+                    sub_payload["plan_confirmed"] = True
                 if sub["started_at"]:
                     sub_payload["started_at"] = sub["started_at"]
                 if sub["expires_at"]:

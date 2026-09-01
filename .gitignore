@@ -15,6 +15,8 @@ env/
 .env
 .env.*
 !.env.example
+.claude/push-gate.local.sh
+.claude/.push_gate_*.json
 
 # Tooling caches
 .pytest_cache/
