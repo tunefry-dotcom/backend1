@@ -156,12 +156,26 @@ def credit_referral(
                 "payment_ref": payment_ref,
             }
         ).execute()
-
-        recompute_balance(referrer_email)
     except Exception as exc:
         _log.warning(
             "Referral commission crediting failed for referred user %s (plan=%s): %s",
             referred_user_id, plan.value, exc,
+        )
+        return
+
+    # Separate try/except: the referral_earnings row above is already
+    # committed at this point, so a failure here must be loud and
+    # distinguishable — otherwise the audit ledger and the wallet silently
+    # disagree with no trace of why (this is exactly how the .maybe_single()
+    # bug in recompute_balance went unnoticed).
+    try:
+        recompute_balance(referrer_email)
+    except Exception as exc:
+        _log.error(
+            "Referral commission recorded but wallet recompute failed for "
+            "referrer %s (email=%s, referred=%s, plan=%s): %s — balance is "
+            "now STALE until the next recompute_balance() call for this email.",
+            referrer_user_id, referrer_email, referred_user_id, plan.value, exc,
         )
 
 

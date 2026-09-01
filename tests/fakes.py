@@ -36,10 +36,18 @@ class FakeQuery:
         return self
 
     def maybe_single(self, *a, **k):
-        # Real supabase-py unwraps .data to a single dict (or None) after this
-        # call, instead of a list — mirror that so callers using
-        # `.maybe_single().execute().data["field"]` see the same shape.
-        self._data = self._data[0] if self._data else None
+        # Real postgrest-py sets Accept: application/vnd.pgrst.object+json,
+        # which makes PostgREST return 406 (not 200-with-null) for zero
+        # matching rows — the client raises APIError on that, it does NOT
+        # return None gracefully. Mirror that exactly: raise on empty so
+        # tests catch code that assumes maybe_single() is safe on a possibly
+        # -empty table (it isn't — see earnings/service.py's recompute_balance
+        # fix). On exactly one row, unwrap .data to that single dict.
+        if not self._data:
+            raise RuntimeError(
+                "APIError: JSON object requested, multiple (or no) rows returned"
+            )
+        self._data = self._data[0]
         return self
 
     def insert(self, row, *a, **k):

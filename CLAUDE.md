@@ -487,6 +487,20 @@ exposed. `SERVICE_ROLE_KEY` is server-only — never ship to client.
   the async event loop.
 - `admin.create_user` error messages are parsed with `_is_duplicate_email_error`
   — brittle but no other API surface for this.
+- **Never use `.maybe_single()` on a query that can legitimately match zero
+  rows.** It sets `Accept: application/vnd.pgrst.object+json`, and PostgREST
+  returns **406** (not 200-with-null) for zero matches — the installed
+  `postgrest-py` raises `APIError` on that instead of returning `None`. This
+  bit `recompute_balance()`'s `artist_balances` lookup for any user with no
+  pre-existing balance row (e.g. a referrer who never sold a song, credited
+  for the first time via a referral) — the exception was silently swallowed
+  by `credit_referral`'s try/except, leaving `available_balance` stale with
+  no trace. Fixed by switching to the safe pattern already used in
+  `get_balance()`: plain `.select(...).eq(...).limit(1).execute()` +
+  manual `(res.data or [None])[0]` check, which never raises on zero rows.
+  Two more latent instances of the same bug were fixed in
+  `admin/router.py`'s song-stats PATCH/DELETE-by-id lookups (were returning
+  a confusing 502 instead of the intended 404 for a missing row).
 
 ### Payments
 - Amount is derived server-side from `PLAN_SPECS` — never trust the client.

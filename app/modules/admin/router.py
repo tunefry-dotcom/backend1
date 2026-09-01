@@ -1328,24 +1328,30 @@ async def admin_update_song_stat(row_id: str, body: AdminSongStatUpdate) -> dict
     svc = get_service_client()
 
     # Fetch the row first to get user_email for balance recompute.
+    # Plain select + limit(1) instead of .maybe_single() — the latter raises
+    # (PostgREST 406) rather than returning an empty result when the id
+    # doesn't match, which would surface as a confusing 502 here instead of
+    # the intended 404 below.
     try:
-        existing = (
+        existing_res = (
             svc.table("song_stats")
             .select("id,user_email,song_title,artist_name,platform,platform_group,"
                     "period_month,period_year,streams,revenue,submission_id")
             .eq("id", row_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=str(exc)) from exc
 
-    if not existing.data:
+    existing_rows = existing_res.data or []
+    if not existing_rows:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"song_stats row {row_id!r} not found")
 
-    email = existing.data["user_email"]
+    existing_row = existing_rows[0]
+    email = existing_row["user_email"]
     patch: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
 
     if body.streams is not None:
@@ -1377,22 +1383,23 @@ async def admin_delete_song_stat(row_id: str) -> dict:
     svc = get_service_client()
 
     try:
-        existing = (
+        existing_res = (
             svc.table("song_stats")
             .select("user_email")
             .eq("id", row_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
                             detail=str(exc)) from exc
 
-    if not existing.data:
+    existing_rows = existing_res.data or []
+    if not existing_rows:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"song_stats row {row_id!r} not found")
 
-    email = existing.data["user_email"]
+    email = existing_rows[0]["user_email"]
 
     try:
         svc.table("song_stats").delete().eq("id", row_id).execute()

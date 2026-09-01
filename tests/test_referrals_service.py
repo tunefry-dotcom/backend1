@@ -91,6 +91,21 @@ class CreditReferralTests(unittest.TestCase):
         self.assertEqual(inserted["payment_ref"], "pay_123")
         mock_recompute.assert_called_once_with("referrer@example.com")
 
+    def test_recompute_failure_is_logged_loudly_but_does_not_raise(self):
+        """The referral_earnings insert must not be undone/hidden by a
+        recompute failure — and the failure must be distinguishable from
+        every other swallowed warning in this file (this is the exact
+        silent-failure shape that hid the .maybe_single() bug)."""
+        client = self._client_with_referral("referrer-1", "referrer@example.com")
+        with patch.object(referrals_service, "get_service_client", return_value=client), \
+             patch.object(referrals_service, "recompute_balance", side_effect=RuntimeError("boom")), \
+             self.assertLogs(referrals_service._log, level="ERROR") as logs:
+            referrals_service.credit_referral(referred_user_id="u1", plan=Plan.SINGLE_ARTIST, source="payment")
+
+        # The audit row was still inserted despite the recompute failure.
+        self.assertIsNotNone(client.table("referral_earnings").last_insert)
+        self.assertTrue(any("wallet recompute failed" in m for m in logs.output))
+
     def test_missing_referrer_email_skips_credit(self):
         client = FakeClient({
             "referrals": FakeQuery(data=[{"referrer_user_id": "referrer-1"}]),

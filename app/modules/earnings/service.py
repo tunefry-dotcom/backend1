@@ -103,14 +103,21 @@ def recompute_balance(email: str) -> dict[str, Any]:
 
     total_earned = sum((_dec(r["revenue"]) for r in rows), Decimal("0")) + _sum_referral_earnings(svc, email)
 
-    bal = (
+    # NOT .maybe_single() — PostgREST returns 406 (not 200-with-empty-body) for
+    # zero matching rows under the singular Accept header, which the client
+    # library raises as an APIError. A brand-new artist_balances row (e.g. a
+    # referrer with no prior song earnings) hits this every time. Plain
+    # select + manual first-element check (same pattern as get_balance() above)
+    # never raises on zero rows.
+    bal_res = (
         svc.table("artist_balances")
         .select("total_withdrawn")
         .eq("user_email", email)
-        .maybe_single()
+        .limit(1)
         .execute()
     )
-    total_withdrawn = _dec(bal.data["total_withdrawn"]) if bal.data else Decimal("0")
+    bal_rows = bal_res.data or []
+    total_withdrawn = _dec(bal_rows[0]["total_withdrawn"]) if bal_rows else Decimal("0")
 
     pending_res = (
         svc.table("withdrawal_requests")

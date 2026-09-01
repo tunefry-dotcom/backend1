@@ -45,6 +45,29 @@ class RecomputeBalanceReferralTests(unittest.TestCase):
 
         self.assertEqual(result["total_earned"], 100.0)
 
+    def test_brand_new_referrer_with_no_prior_balance_row_does_not_raise(self):
+        """Regression test: a referrer with zero prior artist_balances rows
+        (e.g. someone who only ever referred, never sold a song) used to
+        crash recompute_balance — .maybe_single() raises on PostgREST's 406
+        for zero matching rows rather than returning None. This is exactly
+        the state a first-time referral commission recipient is in.
+        """
+        client = FakeClient({
+            "song_stats": FakeQuery(data=[]),
+            "artist_balances": FakeQuery(data=[]),  # no pre-existing row at all
+            "withdrawal_requests": FakeQuery(data=[]),
+            "referral_earnings": FakeQuery(data=[{"amount": "159.90"}]),
+        })
+        with patch.object(earnings_service, "get_service_client", return_value=client):
+            result = earnings_service.recompute_balance("new-referrer@example.com")
+
+        self.assertEqual(result["total_earned"], 159.90)
+        self.assertEqual(result["available_balance"], 159.90)
+        # Confirms the upsert was actually reached (previously it never was).
+        self.assertEqual(
+            client.table("artist_balances").last_upsert["available_balance"], "159.90"
+        )
+
 
 class EarningsSummaryReferralTests(unittest.TestCase):
     def test_total_revenue_includes_referral_earnings(self):
