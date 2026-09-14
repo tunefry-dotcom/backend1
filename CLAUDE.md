@@ -327,7 +327,7 @@ pure persistence function):
 | Single Song | ₹299 | 85% | 1 | 1 | Singles only |
 | Starter | ₹999/yr | 90% | ∞ | 1 | + Content ID, Instagram linking |
 | Single Artist | ₹1,599/yr | 100% | ∞ | 1 | + Albums, transfers, playlist pitching |
-| Double Artist | ₹2,999/yr | 100% | ∞ | 2 | + Custom label name |
+| Double Artist | ₹2,999/yr | 100% | ∞ | ∞ | + Custom label name |
 | Label | ₹6,999/yr | 100% | ∞ | 5 | + Custom label; ₹1,260/extra artist |
 
 **Feature enum** (gating keys): `RELEASE_SINGLE`, `RELEASE_ALBUM`,
@@ -337,6 +337,15 @@ pure persistence function):
 - Canonical matrix in `billing/plans.py` → `PLAN_SPECS` dict. Frontend mirrors
   feature keys in `src/lib/billing.js`; full entitlement map fetched from
   `/billing/me`.
+- **`max_artists`** is the number of *main-artist credits allowed per song/track*
+  in the upload forms (`songs[].main_artists[]`) — not artist-profile/label seats.
+  `None` (backend) / `Infinity` (frontend `PLAN_MAX_ARTISTS`) means unlimited, same
+  convention as `max_releases`. Double Artist was changed to unlimited on
+  2026-09-14 (previously capped at 2). Enforced **only** in the frontend
+  (`planMaxArtists()` in `src/lib/billing.js`, consumed by `NewSong.jsx` /
+  `NewAlbum.jsx` / `TransferSong.jsx` / `TransferAlbum.jsx`) — there is no
+  server-side check in `app/modules/submissions/router.py` (no schema module
+  exists for submissions at all).
 - Gate domain routes: `Depends(require_feature(Feature.X))` → 403 with
   `{error, feature, current_plan, required_plan}`.
 - **Plan in JWT** stamped by Postgres access-token hook

@@ -17,7 +17,7 @@ class PlanSummary(BaseModel):
     price_inr: int
     royalty_pct: int
     max_releases: Optional[int]  # None => unlimited
-    max_artists: int
+    max_artists: Optional[int]  # None => unlimited
     rank: int
     features: dict[str, bool]
 
@@ -29,7 +29,7 @@ class MyPlanResponse(BaseModel):
     name: str
     royalty_pct: int
     max_releases: Optional[int]
-    max_artists: int
+    max_artists: Optional[int]  # None => unlimited
     entitlements: dict[str, bool]
     is_free: bool
     # Features the user does NOT have, each with the cheapest plan that unlocks it.

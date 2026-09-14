@@ -79,7 +79,7 @@ class PlanSpec:
         price_inr: int,
         royalty_pct: int,
         max_releases: Optional[int],
-        max_artists: int,
+        max_artists: Optional[int],
         features: frozenset[Feature],
     ) -> None:
         self.plan = plan
@@ -87,7 +87,7 @@ class PlanSpec:
         self.price_inr = price_inr
         self.royalty_pct = royalty_pct
         self.max_releases = max_releases  # None => unlimited
-        self.max_artists = max_artists
+        self.max_artists = max_artists  # None => unlimited
         self.features = features
 
 
@@ -155,7 +155,7 @@ PLAN_SPECS: dict[Plan, PlanSpec] = {
         price_inr=2999,
         royalty_pct=100,
         max_releases=None,
-        max_artists=2,
+        max_artists=None,
         features=frozenset(_ALL_PLANS_FEATURE | _PREMIUM | {Feature.CUSTOM_LABEL}),
     ),
     Plan.LABEL: PlanSpec(
