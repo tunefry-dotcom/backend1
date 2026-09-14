@@ -173,6 +173,17 @@ browser (not just Safari). Full write-up in `docs/auth-crosssite-cookie-fix.md`.
 - `tf_notif_ts_{uid}` — timestamp of last approval notification check
 - `tunefry_admin_secret` — sessionStorage key for admin panel secret
 
+**Playlist pitching eligibility window (2026-09-15)** — a submission is only
+pitchable (shown in Overview's "Pitch Your Song" card and the `/pitch-song`
+song dropdown) when `isPitchEligible()` (`src/lib/pitchEligibility.js`)
+returns true: `status === 'approved'`, `submission_type` is `new_song` or
+`new_album` (transfers excluded — those releases are already live
+elsewhere), `today − created_at ≥ 30 days` (must sit in the system for 30
+days before it activates), and `today < data.go_live_date` (turns off the
+day the release goes live). Computed entirely client-side in `Overview.jsx`
+and `PitchSong.jsx` — no backend change, since `GET /submissions/my`
+already returns `created_at` and `data.go_live_date` verbatim.
+
 ## Auth model
 
 - **Session transport = httpOnly cookies** (`sb-access-token`, `sb-refresh-token`)
