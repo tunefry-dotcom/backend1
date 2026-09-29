@@ -3,8 +3,11 @@ enriched with account identity from a legacy reference file and SQL dump.
 
 Attribution rules for multi-artist rows:
   - Exactly 1 credited artist has a Tunefry account → only that artist gets the royalty.
-  - 2+ credited artists all have Tunefry accounts → CONFLICT: all receive the royalty
-    and the row is logged to the Conflicts sheet for manual review.
+  - 2+ credited artists all have Tunefry accounts → AUTO-RESOLVED, silently: the artist
+    listed FIRST in the original artist-credit string gets the full royalty/stats; the
+    other registered co-artist(s) get nothing from that track. Deterministic — there is
+    always exactly one "first" name, so nothing is ever left ambiguous or needs manual
+    review, and there is no separate Conflicts sheet in the output.
   - 0 credited artists have Tunefry accounts → all name-only artists receive the royalty.
   - Single-artist rows → always attributed normally.
 
@@ -76,8 +79,6 @@ _DARK_BLUE   = "1F4E79"
 _MID_BLUE    = "2E74B5"
 _LIGHT_BLUE  = "BDD7EE"
 _WHITE       = "FFFFFF"
-_ORANGE      = "C55A11"
-_LIGHT_ORANGE = "FCE4D6"
 _INR_FMT     = '#,##0.00'
 
 
@@ -360,7 +361,6 @@ def _new_group(name: str, identity: dict) -> dict:
         "identity":      identity,
         "streams":       0,
         "royalty":       Decimal("0"),
-        "has_conflicts": False,
         "songs":         defaultdict(lambda: {
             "streams": 0,
             "royalty": Decimal("0"),
@@ -387,19 +387,21 @@ def _split_artists(artist_raw: str) -> list[str]:
 def aggregate(
     rows: list[dict],
     name_to_identity: dict[str, dict],
-) -> tuple[dict[str, dict], list[dict]]:
+) -> dict[str, dict]:
     """
     Aggregate rows by individual artist with Tunefry-aware attribution:
       single-artist row     → attributed normally regardless of registration
       multi-artist, 1 reg   → only the registered Tunefry artist gets the royalty
-      multi-artist, 2+ reg  → CONFLICT: all registered artists receive royalty + row flagged
+      multi-artist, 2+ reg  → auto-resolved: the artist listed FIRST in the
+                               original credit string gets the full royalty;
+                               other registered co-artist(s) get nothing from
+                               that row. Deterministic — never ambiguous, so
+                               there is nothing left to flag for review.
       multi-artist, 0 reg   → all name-only artists receive royalty (no account dispute)
 
-    Returns (groups dict, list of conflict dicts).
+    Returns the groups dict.
     """
     groups: dict[str, dict] = {}
-    # conflict key: (artist_raw_lower, title_lower)
-    conflicts_map: dict[tuple, dict] = {}
 
     multi_rows = 0
     single_attribution = 0
@@ -418,8 +420,6 @@ def aggregate(
         p_str   = row["period"]
         mk      = p_str if re.match(r"\d{4}-\d{2}", p_str) else (p_str or "Unknown")
 
-        is_conflict = False
-
         if len(individuals) == 1:
             # Single artist — always attributed
             targets = individuals
@@ -435,22 +435,12 @@ def aggregate(
                 targets = registered
                 single_attribution += 1
             elif len(registered) >= 2:
-                # Multiple Tunefry accounts on one row — conflict
-                targets = registered
-                is_conflict = True
+                # 2+ Tunefry accounts on one row — auto-resolve: whoever is
+                # listed FIRST in the original credit string (registered[0],
+                # since _split_artists/registered both preserve that order)
+                # gets the full royalty; the rest get nothing from this row.
+                targets = [registered[0]]
                 conflict_rows += 1
-                ck = (artist_raw.lower(), title.lower())
-                if ck not in conflicts_map:
-                    conflicts_map[ck] = {
-                        "artist_raw":   artist_raw,
-                        "title":        title,
-                        "conflicting":  registered,
-                        "sub_label":    sub,
-                        "royalty":      Decimal("0"),
-                        "periods":      set(),
-                    }
-                conflicts_map[ck]["royalty"] += royalty
-                conflicts_map[ck]["periods"].add(mk)
             else:
                 # No Tunefry accounts — attribute to all name-only
                 targets = individuals
@@ -464,9 +454,6 @@ def aggregate(
                 })
                 groups[artist_name] = _new_group(artist_name, idt)
             g = groups[artist_name]
-
-            if is_conflict:
-                g["has_conflicts"] = True
 
             g["streams"]             += qty
             g["royalty"]              += royalty
@@ -482,10 +469,10 @@ def aggregate(
     print(f"\n  Attribution breakdown (multi-artist rows only):")
     print(f"    Multi-artist rows total:          {multi_rows}")
     print(f"    Attributed to 1 registered only:  {single_attribution}")
-    print(f"    Conflict (2+ registered):         {conflict_rows}")
+    print(f"    Auto-resolved (2+ registered):    {conflict_rows}")
     print(f"    All name-only (0 registered):     {name_only_multi}")
 
-    return groups, list(conflicts_map.values())
+    return groups
 
 # ── workbook builder ──────────────────────────────────────────────────────────
 
@@ -510,16 +497,6 @@ def _write_artist_sheet(wb: Workbook, gd: dict) -> None:
     sheet_name = _safe_sheet_name(gd["name"], [ws.title for ws in wb.worksheets])
     ws = wb.create_sheet(sheet_name)
     r = 1
-
-    # Conflict warning banner
-    if gd["has_conflicts"]:
-        cell = ws.cell(row=r, column=1,
-            value="CONFLICT: One or more collaborative tracks credit multiple Tunefry accounts. "
-                  "See the Conflicts sheet for details.")
-        cell.font = Font(bold=True, color=_WHITE)
-        cell.fill = PatternFill("solid", fgColor=_ORANGE)
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
-        r += 1
 
     # ── Identity ──────────────────────────────────────────────────────────────
     _section_title(ws, r, "ARTIST IDENTITY", ncols=4); r += 1
@@ -595,48 +572,8 @@ def _write_artist_sheet(wb: Workbook, gd: dict) -> None:
     _autofit(ws)
 
 
-def _write_conflicts_sheet(wb: Workbook, conflicts: list[dict]) -> None:
-    """Add a Conflicts sheet listing all rows where 2+ Tunefry accounts share credit."""
-    ws = wb.create_sheet("Conflicts")
-    ws.sheet_properties.tabColor = "C55A11"  # orange tab — stands out among blue artist tabs
-    r = 1
-
-    note = ws.cell(row=r, column=1,
-        value=(
-            f"CONFLICT REVIEW REQUIRED — {len(conflicts)} track(s) credit multiple Tunefry "
-            "accounts. Each conflicted track's royalty has been attributed to ALL credited "
-            "registered accounts. Manually decide the correct attribution and adjust."
-        ))
-    note.font = Font(bold=True, color=_WHITE)
-    note.fill = PatternFill("solid", fgColor=_ORANGE)
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
-    r += 2
-
-    _write_header_row(ws, r, [
-        "Track Title", "Original Artist String",
-        "Conflicting Tunefry Accounts",
-        "Distributor", "Total Royalty (INR)", "Periods",
-    ]); r += 1
-
-    for c in sorted(conflicts, key=lambda x: x["royalty"], reverse=True):
-        ws.cell(r, 1, c["title"])
-        ws.cell(r, 2, c["artist_raw"])
-        ws.cell(r, 3, ", ".join(c["conflicting"]))
-        ws.cell(r, 4, c["sub_label"])
-        vc = ws.cell(r, 5, _f(c["royalty"]));  vc.number_format = _INR_FMT
-        ws.cell(r, 6, ", ".join(sorted(c["periods"])))
-        # Highlight the row
-        fill = PatternFill("solid", fgColor="FCE4D6")
-        for col in range(1, 7):
-            ws.cell(r, col).fill = fill
-        r += 1
-
-    _autofit(ws)
-
-
 def build_workbook(
     groups: dict[str, dict],
-    conflicts: list[dict],
     report_total: Decimal,
 ) -> Workbook:
     wb = Workbook()
@@ -648,10 +585,6 @@ def build_workbook(
     ref_count  = sum(1 for g in sorted_groups if g["identity"].get("source") == "Reference File")
     sql_count  = sum(1 for g in sorted_groups if g["identity"].get("source") == "Legacy SQL Dump")
     name_only  = sum(1 for g in sorted_groups if g["identity"].get("source") == "Name Only")
-    n_conflict = sum(1 for g in sorted_groups if g["has_conflicts"])
-
-    # ── Conflicts sheet FIRST so it's always tab #1 ───────────────────────────
-    _write_conflicts_sheet(wb, conflicts)
 
     # ── Summary sheet ─────────────────────────────────────────────────────────
     ws_sum = wb.create_sheet("Summary")
@@ -664,15 +597,15 @@ def build_workbook(
             f"Reference File: {ref_count}  |  "
             f"SQL Dump: {sql_count}  |  "
             f"Name Only: {name_only}  |  "
-            f"Conflict flags: {n_conflict}  |  "
-            "NOTE: Multi-artist rows attributed only to registered Tunefry accounts where possible."
+            "NOTE: Multi-artist rows attributed only to registered Tunefry accounts where possible; "
+            "when 2+ are registered, the artist listed first in the credit string is assigned the row."
         ))
     note_cell.font = Font(italic=True, color="595959")
-    ws_sum.merge_cells(start_row=1, start_column=1, end_row=1, end_column=11)
+    ws_sum.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
 
     _write_header_row(ws_sum, 2, [
         "#", "Artist Name", "UserID", "Username", "Full Name", "Email",
-        "Identity Source", "Conflict?", "Total Streams",
+        "Identity Source", "Total Streams",
         "Total Royalty (INR)", "Remaining Balance (INR)",
     ])
     ws_sum.freeze_panes = "A3"
@@ -689,13 +622,12 @@ def build_workbook(
             str(idt.get("FullName") or ""),
             str(idt.get("Email") or ""),
             src,
-            "YES" if gd["has_conflicts"] else "",
             gd["streams"],
             bal,
             bal,
         ])
         row_num = idx + 2
-        for col_i in (10, 11):
+        for col_i in (9, 10):
             ws_sum.cell(row=row_num, column=col_i).number_format = _INR_FMT
         # Colour the source cell
         src_cell = ws_sum.cell(row=row_num, column=7)
@@ -705,10 +637,6 @@ def build_workbook(
             src_cell.font = Font(color="833C00")
         else:
             src_cell.font = Font(color="595959")
-        # Colour conflict cell
-        if gd["has_conflicts"]:
-            c_cell = ws_sum.cell(row=row_num, column=8)
-            c_cell.font = Font(color=_ORANGE, bold=True)
 
     _autofit(ws_sum)
 
@@ -771,25 +699,24 @@ def main() -> None:
 
     # Aggregate
     print("\nAggregating (Tunefry-aware attribution) ...")
-    groups, conflicts = aggregate(rows, name_to_identity)
+    groups = aggregate(rows, name_to_identity)
 
     grand_sum = sum(g["royalty"] for g in groups.values())
     print(f"\nResults:")
     print(f"  Unique artists with royalty:  {len(groups)}")
     print(f"  Report total (INR):           {float(report_total):,.2f}")
     print(f"  Sum across artist sheets:     {float(grand_sum):,.2f}")
-    print(f"  Conflict tracks flagged:      {len(conflicts)}")
 
     # Build and save
     print("\nBuilding workbook ...")
-    wb = build_workbook(groups, conflicts, report_total)
+    wb = build_workbook(groups, report_total)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
 
     sheet_count = len(wb.worksheets)
     print(f"\nSaved: {output_path}")
-    print(f"  {sheet_count} sheets  (Summary + Conflicts + {sheet_count - 2} artist sheets)")
+    print(f"  {sheet_count} sheets  (Summary + {sheet_count - 1} artist sheets)")
 
 
 if __name__ == "__main__":

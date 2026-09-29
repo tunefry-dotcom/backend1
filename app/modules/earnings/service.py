@@ -75,11 +75,30 @@ def _sum_referral_earnings(svc: Any, email: str) -> Decimal:
         return Decimal("0")
 
 
+def _sum_balance_adjustments(svc: Any, email: str) -> Decimal:
+    """Sum public.balance_adjustments for this email (0 if the table doesn't exist yet).
+
+    Signed ledger: positive rows are admin credits, negative rows are admin
+    debits — same immutable-audit-row model as referral_earnings above.
+    """
+    try:
+        res = (
+            svc.table("balance_adjustments")
+            .select("amount")
+            .eq("user_email", email)
+            .execute()
+        )
+        return sum((_dec(r["amount"]) for r in (res.data or [])), Decimal("0"))
+    except Exception:
+        return Decimal("0")
+
+
 def recompute_balance(email: str) -> dict[str, Any]:
-    """Recompute artist_balances from scratch after any song_stats/referral mutation.
+    """Recompute artist_balances from scratch after any song_stats/referral/adjustment mutation.
 
     Sums total_earned from all song_stats rows plus any referral commissions
-    credited to this email (migration 0010), preserves total_withdrawn (encodes
+    credited to this email (migration 0010) plus any manual admin balance
+    adjustments (migration 0012), preserves total_withdrawn (encodes
     withdrawn_baseline.json + paid requests — cannot be re-derived here), then
     subtracts pending withdrawal requests for available_balance.
     """
@@ -101,7 +120,11 @@ def recompute_balance(email: str) -> dict[str, Any]:
             break
         start += 1000
 
-    total_earned = sum((_dec(r["revenue"]) for r in rows), Decimal("0")) + _sum_referral_earnings(svc, email)
+    total_earned = (
+        sum((_dec(r["revenue"]) for r in rows), Decimal("0"))
+        + _sum_referral_earnings(svc, email)
+        + _sum_balance_adjustments(svc, email)
+    )
 
     # NOT .maybe_single() — PostgREST returns 406 (not 200-with-empty-body) for
     # zero matching rows under the singular Accept header, which the client
@@ -310,15 +333,49 @@ def get_song_detail(email: str, submission_id: str) -> dict[str, Any]:
 
 
 def list_my_withdrawals(email: str) -> list[dict[str, Any]]:
+    """Merged, chronological payout history: real withdrawals + admin balance adjustments.
+
+    Each item is tagged with a ``type`` discriminator ("withdrawal" or
+    "adjustment") so the frontend can render both in one list without a
+    second API call. Real withdrawal rows keep their exact original shape
+    (only the added ``type``/``comment`` keys are new) — existing consumers
+    reading amount/status/method/requested_at/processed_at are unaffected.
+    """
     svc = get_service_client()
+    items: list[dict[str, Any]] = []
+
     try:
         resp = (svc.table("withdrawal_requests")
                 .select("id,amount,status,method,requested_at,processed_at")
                 .eq("user_email", email)
                 .order("requested_at", desc=True).execute())
-        return resp.data or []
+        for r in (resp.data or []):
+            items.append({**r, "type": "withdrawal", "comment": None})
     except Exception:
-        return []
+        pass
+
+    try:
+        resp = (svc.table("balance_adjustments")
+                .select("id,amount,comment,created_at")
+                .eq("user_email", email)
+                .order("created_at", desc=True).execute())
+        for r in (resp.data or []):
+            amount = _dec(r.get("amount"))
+            items.append({
+                "id": r.get("id"),
+                "type": "adjustment",
+                "amount": r.get("amount"),
+                "status": "credit" if amount >= 0 else "debit",
+                "method": "adjustment",
+                "comment": r.get("comment"),
+                "requested_at": r.get("created_at"),
+                "processed_at": None,
+            })
+    except Exception:
+        pass
+
+    items.sort(key=lambda x: x.get("requested_at") or "", reverse=True)
+    return items
 
 
 class WithdrawalError(ValueError):

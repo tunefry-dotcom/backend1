@@ -70,6 +70,12 @@
             "type": "command",
             "command": "bash .claude/post-data-safety-hook.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/plan-review-hook.sh",
+            "timeout": 5,
+            "statusMessage": "Running plan review protocol..."
           }
         ]
       }

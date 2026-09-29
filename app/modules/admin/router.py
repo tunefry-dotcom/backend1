@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 from typing import Annotated, Any, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
+import openpyxl
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -24,9 +27,10 @@ from app.modules.billing.plans import Plan, get_spec
 from app.modules.billing.service import assign_plan
 from app.modules.home import service as home_service
 from app.modules.home.schemas import HomeContent
-from app.modules.earnings.service import recompute_balance
+from app.modules.earnings.service import get_balance, recompute_balance
 from app.modules.profile import service as profile_service
 from app.modules.referrals.service import credit_referral
+from migration.platform_map import normalize_platform
 
 _log = logging.getLogger(__name__)
 
@@ -1145,6 +1149,12 @@ class AdminSongStatUpdate(BaseModel):
     revenue: Optional[str] = None  # Decimal string ≥ 0
 
 
+class AdminBalanceAdjustmentCreate(BaseModel):
+    user_email: str
+    amount: str  # signed Decimal string — positive = credit, negative = debit
+    comment: str = Field(min_length=1, max_length=500)
+
+
 def _parse_revenue(rev: str) -> Decimal:
     try:
         d = Decimal(str(rev))
@@ -1254,7 +1264,24 @@ async def get_artist_earnings(
     for r in rows:
         r["revenue"] = float(Decimal(str(r.get("revenue") or 0)).quantize(Decimal("0.01")))
 
-    return {"artist": artist_info, "rows": rows}
+    # Manual balance adjustments (migration 0012) for this artist's Adjust
+    # Balance panel — degrades to [] if the table doesn't exist yet.
+    adjustments: list[dict] = []
+    try:
+        adj_res = (
+            svc.table("balance_adjustments")
+            .select("id,amount,comment,created_at")
+            .eq("user_email", email)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        for a in (adj_res.data or []):
+            a["amount"] = float(Decimal(str(a.get("amount") or 0)).quantize(Decimal("0.01")))
+            adjustments.append(a)
+    except Exception:
+        pass
+
+    return {"artist": artist_info, "rows": rows, "adjustments": adjustments}
 
 
 @router.post("/song-stats", dependencies=[Depends(_require_admin)])
@@ -1411,6 +1438,100 @@ async def admin_delete_song_stat(row_id: str) -> dict:
     return {"deleted": True, "balance": balance}
 
 
+@router.post("/balance-adjustments", dependencies=[Depends(_require_admin)])
+async def admin_create_balance_adjustment(body: AdminBalanceAdjustmentCreate) -> dict:
+    """Manually credit or debit an artist's balance with a required comment.
+
+    Writes an immutable row to balance_adjustments (migration 0012) rather
+    than touching artist_balances directly — recompute_balance() sums this
+    ledger every time it runs, so the adjustment survives every future
+    recompute (song_stats edits, monthly royalty ingest) instead of being
+    silently overwritten.
+    """
+    try:
+        amount = Decimal(str(body.amount))
+    except (InvalidOperation, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"amount must be a decimal string, got: {body.amount!r}",
+        ) from exc
+    if amount == 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="amount must be nonzero")
+
+    email = body.user_email.lower().strip()
+
+    # recompute_balance() floors available_balance at 0 but NOT total_earned —
+    # a debit larger than the artist's current total_earned would otherwise
+    # drive it negative. Reject before writing anything.
+    current = get_balance(email)
+    if amount < 0 and abs(amount) > Decimal(str(current["total_earned"])):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(f"Debit of {abs(amount)} exceeds current total earned "
+                    f"of {current['total_earned']}"),
+        )
+
+    svc = get_service_client()
+    row = {
+        "user_email": email,
+        "amount": str(amount),
+        "comment": body.comment,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        res = svc.table("balance_adjustments").insert(row).execute()
+        created = (res.data or [row])[0]
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    balance = recompute_balance(email)
+    return {"ok": True, "balance": balance, "adjustment": created}
+
+
+@router.delete("/balance-adjustments/{adjustment_id}", dependencies=[Depends(_require_admin)])
+async def admin_delete_balance_adjustment(adjustment_id: str) -> dict:
+    """Delete a manual adjustment and recompute the artist's balance.
+
+    No separate credit-back step is needed (unlike withdrawal_requests) —
+    recompute_balance() re-sums balance_adjustments from scratch, so removing
+    a row automatically reverses its effect on total_earned/available_balance.
+    """
+    svc = get_service_client()
+
+    # Plain select + limit(1), not .maybe_single() — PostgREST 406s on zero
+    # rows under the singular Accept header, which would surface as a
+    # confusing 502 here instead of the intended 404 below.
+    try:
+        existing_res = (
+            svc.table("balance_adjustments")
+            .select("user_email")
+            .eq("id", adjustment_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    existing_rows = existing_res.data or []
+    if not existing_rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"balance_adjustments row {adjustment_id!r} not found")
+
+    email = existing_rows[0]["user_email"]
+
+    try:
+        svc.table("balance_adjustments").delete().eq("id", adjustment_id).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=str(exc)) from exc
+
+    balance = recompute_balance(email)
+    return {"deleted": True, "balance": balance}
+
+
 @router.get("/song-stats/submissions/{email}", dependencies=[Depends(_require_admin)])
 async def admin_list_artist_submissions(email: str) -> dict:
     """Return a lightweight list of an artist's submissions for the Add modal dropdown."""
@@ -1441,3 +1562,335 @@ async def admin_list_artist_submissions(email: str) -> dict:
             "status": r.get("status") or "",
         })
     return {"submissions": submissions}
+
+
+# ---------------------------------------------------------------------------
+# Central USD -> INR rate + bulk Excel import into song_stats
+# ---------------------------------------------------------------------------
+
+_MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+_MAX_IMPORT_ROWS = 20_000
+_REQUIRED_IMPORT_HEADERS = ("song", "streams", "revenue", "month", "year", "platform")
+
+
+def _norm_title(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _to_int(v: Any) -> int:
+    return int(float(v))
+
+
+class ImportRowError(ValueError):
+    """Raised for a malformed import header/row — message is 422-ready."""
+
+
+def _parse_import_rows(header_row: tuple, data_rows: Any) -> dict[str, Any]:
+    """Pure parsing + aggregation of an Excel report's rows.
+
+    No Supabase, no file I/O, no FastAPI — takes exactly what
+    ``openpyxl``'s ``iter_rows(values_only=True)`` yields (the header tuple,
+    then an iterable of data-row tuples) and returns the per
+    (song, platform, month, year) aggregated groups, summed across any
+    ``Country`` column since song_stats has no country grain. Raises
+    ``ImportRowError`` on any bad header/row — kept separate from
+    HTTPException so this function has zero web-framework dependency and can
+    be unit-tested with plain tuples.
+    """
+    if not header_row:
+        raise ImportRowError("Workbook has no header row")
+
+    col_index: dict[str, int] = {}
+    for i, cell in enumerate(header_row):
+        if cell is None:
+            continue
+        col_index[str(cell).strip().lower()] = i
+
+    missing = [h for h in _REQUIRED_IMPORT_HEADERS if h not in col_index]
+    if missing:
+        raise ImportRowError(f"Missing required column(s): {', '.join(missing)}")
+
+    has_artist_col = "artistname" in col_index
+
+    def _cell(row: tuple, key: str) -> Any:
+        idx = col_index.get(key)
+        return row[idx] if idx is not None and idx < len(row) else None
+
+    groups: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    file_artist_names_norm: set[str] = set()
+    first_file_artist_name = ""
+    row_count = 0
+    for row in data_rows:
+        if row is None or all(v is None or str(v).strip() == "" for v in row):
+            continue
+        row_count += 1
+        if row_count > _MAX_IMPORT_ROWS:
+            raise ImportRowError(f"Workbook exceeds the {_MAX_IMPORT_ROWS}-row limit")
+
+        excel_row_num = row_count + 1  # +1 for the header row
+        song_title = str(_cell(row, "song") or "").strip()
+        month = str(_cell(row, "month") or "").strip().title()
+        platform_raw = str(_cell(row, "platform") or "").strip()
+
+        if not song_title:
+            raise ImportRowError(f"Row {excel_row_num}: missing Song")
+        if month not in _VALID_MONTHS:
+            raise ImportRowError(f"Row {excel_row_num}: invalid Month {month!r}")
+        try:
+            streams = _to_int(_cell(row, "streams"))
+            year = _to_int(_cell(row, "year"))
+            revenue_usd = Decimal(str(_cell(row, "revenue")))
+        except (TypeError, ValueError, InvalidOperation):
+            raise ImportRowError(f"Row {excel_row_num}: Streams/Revenue/Year must be numeric")
+        if streams < 0 or revenue_usd < 0:
+            raise ImportRowError(f"Row {excel_row_num}: Streams/Revenue must be non-negative")
+
+        if has_artist_col:
+            a_raw = str(_cell(row, "artistname") or "").strip()
+            if a_raw:
+                file_artist_names_norm.add(_norm_title(a_raw))
+                if not first_file_artist_name:
+                    first_file_artist_name = a_raw
+
+        key = (_norm_title(song_title), platform_raw.lower(), month, year)
+        g = groups.get(key)
+        if g is None:
+            g = {
+                "song_title": song_title, "platform_raw": platform_raw,
+                "month": month, "year": year,
+                "streams": 0, "revenue_usd": Decimal("0"),
+            }
+            groups[key] = g
+        g["streams"] += streams
+        g["revenue_usd"] += revenue_usd
+
+    if not groups:
+        raise ImportRowError("No data rows found in workbook")
+
+    return {
+        "groups": groups,
+        "file_artist_names_norm": file_artist_names_norm,
+        "first_file_artist_name": first_file_artist_name,
+    }
+
+
+class FxRateUpdate(BaseModel):
+    usd_to_inr: str  # Decimal string — validated server-side
+
+
+@router.get("/fx-rate", dependencies=[Depends(_require_admin)])
+async def get_fx_rate() -> dict:
+    """Return the centrally-set USD -> INR rate used by /admin/song-stats/import.
+
+    Not per-artist, not per-upload — set once here, then every subsequent
+    import for every artist uses whatever is currently stored.
+    """
+    svc = get_service_client()
+    try:
+        res = svc.table("fx_rate_settings").select("usd_to_inr,updated_at").eq("id", 1).limit(1).execute()
+        rows = res.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    if not rows:
+        return {"usd_to_inr": None, "updated_at": None}
+    row = rows[0]
+    return {
+        "usd_to_inr": float(Decimal(str(row["usd_to_inr"]))),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+@router.put("/fx-rate", dependencies=[Depends(_require_admin)])
+async def update_fx_rate(body: FxRateUpdate) -> dict:
+    """Set/replace the centrally-stored USD -> INR conversion rate."""
+    rate = _parse_revenue(body.usd_to_inr)
+    if rate <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="usd_to_inr must be greater than 0",
+        )
+    svc = get_service_client()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        res = svc.table("fx_rate_settings").upsert(
+            {"id": 1, "usd_to_inr": str(rate), "updated_at": now},
+            on_conflict="id",
+        ).execute()
+        row = (res.data or [{}])[0]
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return {
+        "usd_to_inr": float(Decimal(str(row.get("usd_to_inr") or rate))),
+        "updated_at": row.get("updated_at") or now,
+    }
+
+
+@router.post("/song-stats/import", dependencies=[Depends(_require_admin)])
+async def admin_import_song_stats(
+    file: UploadFile = File(...),
+    email: str = Form(...),
+) -> dict:
+    """Bulk-import one artist's monthly Excel royalty report into song_stats.
+
+    Pure deterministic column parsing + matching — no AI/LLM involved anywhere.
+    The USD -> INR rate always comes from the centrally-stored fx_rate_settings
+    row (GET/PUT /admin/fx-rate) — it is never re-entered per upload.
+    """
+    svc = get_service_client()
+    email = email.lower().strip()
+
+    # Fail fast, before touching the file or writing anything, if no rate has
+    # ever been set — this is what makes "just upload, you're sorted" safe.
+    try:
+        rate_res = svc.table("fx_rate_settings").select("usd_to_inr").eq("id", 1).limit(1).execute()
+        rate_rows = rate_res.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    if not rate_rows:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "usd_to_inr_not_set", "detail": "Set the USD→INR rate first."},
+        )
+    usd_to_inr = Decimal(str(rate_rows[0]["usd_to_inr"]))
+
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="File must be a .xlsx workbook")
+
+    raw_bytes = await file.read()
+    if len(raw_bytes) > _MAX_IMPORT_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File exceeds the {_MAX_IMPORT_FILE_BYTES // (1024 * 1024)} MB limit",
+        )
+
+    try:
+        wb = openpyxl.load_workbook(BytesIO(raw_bytes), read_only=True, data_only=True)
+        ws = wb.worksheets[0]
+        rows_iter = ws.iter_rows(values_only=True)
+        header_row = next(rows_iter, None)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Could not read workbook: {exc}") from exc
+
+    try:
+        parsed = _parse_import_rows(header_row, rows_iter)
+    except ImportRowError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=str(exc)) from exc
+
+    groups = parsed["groups"]
+    file_artist_names_norm = parsed["file_artist_names_norm"]
+    first_file_artist_name = parsed["first_file_artist_name"]
+
+    # This artist's existing song_stats, fetched once (not per-row).
+    try:
+        existing_res = (
+            svc.table("song_stats")
+            .select("song_title,artist_name,submission_id")
+            .eq("user_email", email)
+            .execute()
+        )
+        existing_rows = existing_res.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    existing_titles: set[str] = set()
+    title_to_submission: dict[str, Optional[str]] = {}
+    artist_name_on_file = ""
+    for r in existing_rows:
+        norm = _norm_title(r.get("song_title") or "")
+        existing_titles.add(norm)
+        if norm not in title_to_submission:
+            title_to_submission[norm] = r.get("submission_id")
+        if not artist_name_on_file and r.get("artist_name"):
+            artist_name_on_file = r["artist_name"]
+
+    # Best-effort submission_id backfill for brand-new songs — same title
+    # fallback admin_list_artist_submissions already uses.
+    needs_submission_lookup = any(
+        _norm_title(g["song_title"]) not in existing_titles for g in groups.values()
+    )
+    submission_title_map: dict[str, str] = {}
+    if needs_submission_lookup:
+        try:
+            sub_res = (
+                svc.table("submissions")
+                .select("id,data")
+                .eq("user_email", email)
+                .execute()
+            )
+            for r in (sub_res.data or []):
+                d = r.get("data") or {}
+                title = d.get("song_title") or d.get("album_name") or d.get("song_name") or ""
+                if title:
+                    submission_title_map.setdefault(_norm_title(title), r["id"])
+        except Exception:
+            submission_title_map = {}
+
+    artist_name_for_insert = artist_name_on_file or first_file_artist_name
+
+    now = datetime.now(timezone.utc).isoformat()
+    rows_to_upsert: list[dict[str, Any]] = []
+    songs_new: set[str] = set()
+    songs_updated: set[str] = set()
+    total_streams = 0
+    total_revenue_inr = Decimal("0")
+
+    for g in groups.values():
+        norm_title = _norm_title(g["song_title"])
+        is_new = norm_title not in existing_titles
+        (songs_new if is_new else songs_updated).add(norm_title)
+
+        submission_id = title_to_submission.get(norm_title) or submission_title_map.get(norm_title)
+        platform, platform_group = normalize_platform(g["platform_raw"])
+        revenue_inr = g["revenue_usd"] * usd_to_inr
+
+        total_streams += g["streams"]
+        total_revenue_inr += revenue_inr
+
+        rows_to_upsert.append({
+            "user_email": email,
+            "song_title": g["song_title"],
+            "artist_name": artist_name_for_insert,
+            "platform": platform,
+            "platform_group": platform_group,
+            "period_month": g["month"],
+            "period_year": g["year"],
+            "streams": g["streams"],
+            "revenue": str(revenue_inr),
+            "submission_id": submission_id,
+            "updated_at": now,
+        })
+
+    try:
+        res = svc.table("song_stats").upsert(
+            rows_to_upsert,
+            on_conflict="user_email,song_title,platform,period_month,period_year",
+        ).execute()
+        upserted_rows = res.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    balance = recompute_balance(email)
+
+    warnings: list[str] = []
+    if artist_name_on_file and file_artist_names_norm:
+        if _norm_title(artist_name_on_file) not in file_artist_names_norm:
+            warnings.append(
+                f"File's ArtistName does not match the artist on record for {email} "
+                f"({artist_name_on_file!r}) — double-check this is the right artist."
+            )
+
+    return {
+        "imported": {
+            "songs_new": len(songs_new),
+            "songs_updated": len(songs_updated),
+            "rows_written": len(rows_to_upsert),
+            "total_streams": total_streams,
+            "total_revenue_inr": float(total_revenue_inr.quantize(Decimal("0.01"))),
+        },
+        "rows": upserted_rows,
+        "balance": balance,
+        "warnings": warnings,
+    }

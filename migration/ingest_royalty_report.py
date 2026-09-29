@@ -461,6 +461,32 @@ def load_reserved_withdrawals(svc) -> tuple[dict[str, Decimal], dict[str, Decima
     return paid, pending
 
 
+def load_balance_adjustments(svc) -> dict[str, Decimal]:
+    """Sum public.balance_adjustments (migration 0012) grouped by user_email.
+
+    Manual admin add/subtract adjustments — degrades to {} if the table
+    doesn't exist yet (pre-migration), same as the other optional-table reads
+    in this script.
+    """
+    out: dict[str, Decimal] = defaultdict(Decimal)
+    offset = 0
+    try:
+        while True:
+            res = (svc.table("balance_adjustments")
+                   .select("user_email, amount")
+                   .range(offset, offset + 999).execute())
+            page = res.data or []
+            for r in page:
+                email = (r.get("user_email") or "").lower()
+                out[email] += to_decimal(r.get("amount"))
+            if len(page) < 1000:
+                break
+            offset += 1000
+    except Exception:
+        return {}
+    return out
+
+
 def list_existing_balance_emails(svc) -> set[str]:
     """All emails currently in artist_balances — so we recompute them all."""
     out: set[str] = set()
@@ -1254,12 +1280,20 @@ def main() -> None:
     for acc in agg.values():
         new_revenue_by_email[acc["user_email"]] += acc["revenue"]
 
-    # Final total_earned = kept_from_existing + new
+    print("Loading manual balance_adjustments…")
+    adjustments = load_balance_adjustments(svc)
+    print(f"  adjustment users={len(adjustments)}")
+
+    # Final total_earned = kept_from_existing + new + manual admin adjustments
+    # (migration 0012) — mirrors earnings.service.recompute_balance()'s sum so
+    # a manual credit/debit survives this monthly recompute too, not just the
+    # per-user admin song-stats CRUD path.
     total_earned_after: dict[str, Decimal] = defaultdict(Decimal)
     for email in all_emails:
         total_earned_after[email] = (
             total_earned_before.get(email, Decimal("0"))
             + new_revenue_by_email.get(email, Decimal("0"))
+            + adjustments.get(email, Decimal("0"))
         )
 
     # Balance computation

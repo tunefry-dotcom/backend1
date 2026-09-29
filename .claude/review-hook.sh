@@ -14,6 +14,14 @@ COOLDOWN_SECONDS=30
 
 file=$(echo "$input" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
 
+# Plan files get their own dedicated hook (plan-review-hook.sh) — skip here.
+# Exits WITHOUT writing the cooldown timestamp so plan-file writes don't burn the slot
+# and block the next real code-file review.
+if echo "$file" | grep -qi '\.claude/plans/\|\.claude\\plans\\'; then
+  echo '{"continue": true}'
+  exit 0
+fi
+
 # Phase 3 (CLAUDE.md sync) always fires — no cooldown gate.
 # Phases 0-2 (heavy review) are gated by the cooldown to avoid spam.
 IN_COOLDOWN=false
