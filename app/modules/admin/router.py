@@ -1661,11 +1661,21 @@ def _parse_import_rows(header_row: tuple, data_rows: Any) -> dict[str, Any]:
                 if not first_file_artist_name:
                     first_file_artist_name = a_raw
 
-        key = (_norm_title(song_title), platform_raw.lower(), month, year)
+        # Group by the CANONICAL platform, not the raw label — DSP reports
+        # often split one platform into multiple raw sub-lines (e.g. "YouTube"
+        # and "YouTube (PDL)" both normalize to "YouTube"). Grouping on the
+        # raw string would leave those as separate groups that later collide
+        # on the same (song_title, platform, month, year) upsert key, which
+        # Postgres rejects with "ON CONFLICT DO UPDATE command cannot affect
+        # row a second time" — merge them here instead so the upsert batch
+        # never has two rows for the same conflict key.
+        platform, platform_group = normalize_platform(platform_raw)
+        key = (_norm_title(song_title), platform, month, year)
         g = groups.get(key)
         if g is None:
             g = {
                 "song_title": song_title, "platform_raw": platform_raw,
+                "platform": platform, "platform_group": platform_group,
                 "month": month, "year": year,
                 "streams": 0, "revenue_usd": Decimal("0"),
             }
@@ -1852,7 +1862,7 @@ async def admin_import_song_stats(
         (songs_new if is_new else songs_updated).add(norm_title)
 
         submission_id = title_to_submission.get(norm_title) or submission_title_map.get(norm_title)
-        platform, platform_group = normalize_platform(g["platform_raw"])
+        platform, platform_group = g["platform"], g["platform_group"]
         revenue_inr = g["revenue_usd"] * usd_to_inr
 
         total_streams += g["streams"]

@@ -82,6 +82,25 @@ class ParseImportRowsTests(unittest.TestCase):
         parsed = admin_router._parse_import_rows(self.HEADER, rows)
         self.assertEqual(len(parsed["groups"]), 1)
 
+    def test_platform_variants_normalizing_to_same_canonical_merge(self):
+        # A multi-month DSP report can list the same platform under several
+        # raw sub-labels (e.g. "YouTube" and "YouTube (PDL)") that both
+        # normalize to canonical "YouTube". Grouping by the raw string would
+        # leave these as two groups that later collide on the same
+        # (song_title, platform, month, year) upsert key and crash Postgres
+        # with "ON CONFLICT DO UPDATE command cannot affect row a second
+        # time" — they must merge into one group instead.
+        rows = [
+            ("India", "Fearless", "Some Song", 100, "1.00", "March", 2026, "YouTube"),
+            ("India", "Fearless", "Some Song", 50, "0.50", "March", 2026, "YouTube (PDL)"),
+        ]
+        parsed = admin_router._parse_import_rows(self.HEADER, rows)
+        self.assertEqual(len(parsed["groups"]), 1)
+        g = next(iter(parsed["groups"].values()))
+        self.assertEqual(g["platform"], "YouTube")
+        self.assertEqual(g["streams"], 150)
+        self.assertEqual(g["revenue_usd"], Decimal("1.50"))
+
     def test_captures_artist_name_when_column_present(self):
         rows = [("India", "Lalit Sahu", "Tere Bina", 100, "1.00", "May", 2026, "Spotify")]
         parsed = admin_router._parse_import_rows(self.HEADER, rows)
