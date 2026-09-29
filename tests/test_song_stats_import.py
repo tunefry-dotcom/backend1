@@ -74,6 +74,14 @@ class ParseImportRowsTests(unittest.TestCase):
         parsed = admin_router._parse_import_rows(self.HEADER, rows)
         self.assertEqual(len(parsed["groups"]), 1)
 
+    def test_trailing_subtotal_row_is_skipped(self):
+        rows = [
+            ("India", "Lalit Sahu", "Tere Bina", 100, "1.00", "May", 2026, "Spotify"),
+            (None, None, None, 5714, "2.2492387125", None, None, None),
+        ]
+        parsed = admin_router._parse_import_rows(self.HEADER, rows)
+        self.assertEqual(len(parsed["groups"]), 1)
+
     def test_captures_artist_name_when_column_present(self):
         rows = [("India", "Lalit Sahu", "Tere Bina", 100, "1.00", "May", 2026, "Spotify")]
         parsed = admin_router._parse_import_rows(self.HEADER, rows)

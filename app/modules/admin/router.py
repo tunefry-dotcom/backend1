@@ -1623,14 +1623,23 @@ def _parse_import_rows(header_row: tuple, data_rows: Any) -> dict[str, Any]:
     for row in data_rows:
         if row is None or all(v is None or str(v).strip() == "" for v in row):
             continue
+
+        song_title = str(_cell(row, "song") or "").strip()
+        month = str(_cell(row, "month") or "").strip().title()
+        platform_raw = str(_cell(row, "platform") or "").strip()
+
+        if not song_title and not month and not platform_raw:
+            # Trailing subtotal/grand-total row that some DSP report exports
+            # append (only Streams/Revenue filled in, every identifying
+            # column blank). Not real per-song data — skip like a blank row
+            # rather than hard-failing the whole import on it.
+            continue
+
         row_count += 1
         if row_count > _MAX_IMPORT_ROWS:
             raise ImportRowError(f"Workbook exceeds the {_MAX_IMPORT_ROWS}-row limit")
 
         excel_row_num = row_count + 1  # +1 for the header row
-        song_title = str(_cell(row, "song") or "").strip()
-        month = str(_cell(row, "month") or "").strip().title()
-        platform_raw = str(_cell(row, "platform") or "").strip()
 
         if not song_title:
             raise ImportRowError(f"Row {excel_row_num}: missing Song")
