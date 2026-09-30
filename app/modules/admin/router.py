@@ -11,7 +11,7 @@ import re
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, Any, List, Literal, Optional
 from uuid import uuid4
 
 import openpyxl
@@ -489,6 +489,12 @@ async def list_withdrawals() -> dict:
                 .data or []
             )
             prof_map = {p["id"]: p for p in profiles_raw}
+            # Live plan join (same source as /admin/users and /admin/submissions) —
+            # snapshot["plan"] is frozen at request time and goes stale after upgrades.
+            subs_raw = _fetch_all_rows(
+                svc, "subscriptions", "user_id,plan,status,expires_at,started_at"
+            )
+            sub_map = {s["user_id"]: s for s in subs_raw}
             for row in rows:
                 prof = prof_map.get(row.get("user_id"), {})
                 snap = row.get("snapshot") or {}
@@ -500,6 +506,13 @@ async def list_withdrawals() -> dict:
                     snap["state"] = prof.get("state")
                 if snap.get("age") is None:
                     snap["age"] = _age_from_dob(prof.get("date_of_birth"))
+                plan = sub_map.get(row.get("user_id"), {}).get("plan") or "free"
+                try:
+                    plan_enum = Plan(plan)
+                except ValueError:
+                    plan_enum = Plan("free")
+                snap["plan"] = plan_enum.value
+                snap["plan_name"] = get_spec(plan_enum).name
                 row["snapshot"] = snap
     except Exception:
         pass  # enrichment failure must never break the admin list
@@ -508,21 +521,35 @@ async def list_withdrawals() -> dict:
 
 
 class WithdrawalReviewBody(BaseModel):
-    status: str  # only "paid" is accepted (admin marks a request as paid)
-    admin_note: str | None = None
+    status: Literal["paid", "declined"]
+    admin_note: str = Field(min_length=1, max_length=500)
 
 
 @router.patch("/withdrawals/{request_id}", dependencies=[Depends(_require_admin)])
 async def review_withdrawal(request_id: str, body: WithdrawalReviewBody) -> dict:
-    """Mark a request as paid. Balance was already zeroed at request time, so no
-    balance change is needed here (the amount stays counted as withdrawn)."""
-    if body.status != "paid":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="status must be 'paid'")
+    """Mark a request as paid or declined; both require a comment shown to the artist.
+
+    Paid: balance was already zeroed at request time, so no balance change is
+    needed here (the amount stays counted as withdrawn). Declined: the amount
+    was reserved (zeroed out of available_balance) but never added to
+    total_withdrawn, so recompute_balance's pending-only subtraction naturally
+    releases it back once the row's status leaves "pending" — no manual
+    arithmetic, and total_withdrawn is untouched.
+    """
     svc = get_service_client()
     try:
+        existing_res = (svc.table("withdrawal_requests")
+                        .select("user_email").eq("id", request_id).limit(1).execute())
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"Could not fetch withdrawal: {exc}") from exc
+    existing = (existing_res.data or [None])[0]
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
+
+    try:
         resp = (svc.table("withdrawal_requests").update({
-            "status": "paid",
+            "status": body.status,
             "admin_note": body.admin_note,
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", request_id).execute())
@@ -531,14 +558,20 @@ async def review_withdrawal(request_id: str, body: WithdrawalReviewBody) -> dict
                             detail=f"Could not update withdrawal: {exc}") from exc
     if not resp.data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
-    return {"ok": True, "request": resp.data[0]}
+
+    balance = None
+    if body.status == "declined":
+        balance = recompute_balance((existing.get("user_email") or "").lower())
+    return {"ok": True, "request": resp.data[0], "balance": balance}
 
 
 @router.delete("/withdrawals/{request_id}", dependencies=[Depends(_require_admin)])
 async def delete_withdrawal(request_id: str) -> dict:
-    """Delete a request. If it was NOT paid, credit the reserved amount back to
-    the artist's available_balance so no earnings are lost (the request had
-    zeroed it). Deleting a paid request never credits back."""
+    """Delete a request. If it is still pending, credit the reserved amount back
+    to the artist's available_balance so no earnings are lost (the request had
+    zeroed it). Paid or declined requests never credit back here — paid stays
+    counted as withdrawn, and declined already had its amount restored via
+    recompute_balance in review_withdrawal (crediting again would double-count)."""
     svc = get_service_client()
     try:
         res = (svc.table("withdrawal_requests")
@@ -550,7 +583,7 @@ async def delete_withdrawal(request_id: str) -> dict:
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
 
-    if row.get("status") != "paid":
+    if row.get("status") == "pending":
         email = (row.get("user_email") or "").lower()
         bal = (svc.table("artist_balances").select("available_balance")
                .eq("user_email", email).limit(1).execute())

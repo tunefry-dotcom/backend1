@@ -346,11 +346,11 @@ def list_my_withdrawals(email: str) -> list[dict[str, Any]]:
 
     try:
         resp = (svc.table("withdrawal_requests")
-                .select("id,amount,status,method,requested_at,processed_at")
+                .select("id,amount,status,method,requested_at,processed_at,admin_note")
                 .eq("user_email", email)
                 .order("requested_at", desc=True).execute())
         for r in (resp.data or []):
-            items.append({**r, "type": "withdrawal", "comment": None})
+            items.append({**r, "type": "withdrawal", "comment": r.get("admin_note")})
     except Exception:
         pass
 
