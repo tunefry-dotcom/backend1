@@ -477,9 +477,9 @@ async def list_withdrawals() -> dict:
     # pending first; within each group, most-recently requested first
     rows.sort(key=lambda r: _fmt(r.get("requested_at")) or "", reverse=True)
     rows.sort(key=lambda r: r.get("status") != "pending")
-    # Enrich snapshot with live profile data for any null fields (graceful — never blocks).
+    uids = list({r["user_id"] for r in rows if r.get("user_id")})
+    # Backfill missing snapshot fields from live profile data (graceful — never blocks).
     try:
-        uids = list({r["user_id"] for r in rows if r.get("user_id")})
         if uids:
             profiles_raw = (
                 svc.table("profiles")
@@ -489,12 +489,6 @@ async def list_withdrawals() -> dict:
                 .data or []
             )
             prof_map = {p["id"]: p for p in profiles_raw}
-            # Live plan join (same source as /admin/users and /admin/submissions) —
-            # snapshot["plan"] is frozen at request time and goes stale after upgrades.
-            subs_raw = _fetch_all_rows(
-                svc, "subscriptions", "user_id,plan,status,expires_at,started_at"
-            )
-            sub_map = {s["user_id"]: s for s in subs_raw}
             for row in rows:
                 prof = prof_map.get(row.get("user_id"), {})
                 snap = row.get("snapshot") or {}
@@ -506,16 +500,30 @@ async def list_withdrawals() -> dict:
                     snap["state"] = prof.get("state")
                 if snap.get("age") is None:
                     snap["age"] = _age_from_dob(prof.get("date_of_birth"))
+                row["snapshot"] = snap
+    except Exception as exc:
+        _log.warning("Could not backfill profile fields for withdrawals list: %s", exc)
+    # Live plan join (same source as /admin/users and /admin/submissions) — kept in its
+    # own try/except so a profile-fetch failure above can't silently suppress this too.
+    # snapshot["plan"] is frozen at request time and goes stale after upgrades.
+    try:
+        if uids:
+            subs_raw = _fetch_all_rows(
+                svc, "subscriptions", "user_id,plan,status,expires_at,started_at"
+            )
+            sub_map = {s["user_id"]: s for s in subs_raw}
+            for row in rows:
                 plan = sub_map.get(row.get("user_id"), {}).get("plan") or "free"
                 try:
                     plan_enum = Plan(plan)
                 except ValueError:
                     plan_enum = Plan("free")
+                snap = row.get("snapshot") or {}
                 snap["plan"] = plan_enum.value
                 snap["plan_name"] = get_spec(plan_enum).name
                 row["snapshot"] = snap
-    except Exception:
-        pass  # enrichment failure must never break the admin list
+    except Exception as exc:
+        _log.warning("Could not live-join plan for withdrawals list: %s", exc)
     total_pending = sum(_to_decimal(r["amount"]) for r in rows if r.get("status") == "pending")
     return {"requests": rows, "total_pending": float(total_pending)}
 

@@ -533,6 +533,15 @@ exposed. `SERVICE_ROLE_KEY` is server-only — never ship to client.
   Two more latent instances of the same bug were fixed in
   `admin/router.py`'s song-stats PATCH/DELETE-by-id lookups (were returning
   a confusing 502 instead of the intended 404 for a missing row).
+- **One shared `try/except: pass` around unrelated enrichment steps hides
+  which one actually failed.** `list_withdrawals`'s profile backfill and
+  live-plan join used to share a single try/except — a failure in either
+  (e.g. the `profiles` fetch) silently skipped the other too, so the
+  `snapshot.plan` live-join fix appeared to "not work" for every row with
+  zero error signal. Fixed 2026-10-01 by giving each enrichment step its
+  own try/except with `_log.warning(...)` on failure — a lesson for any
+  future multi-step enrichment block in this file: isolate failure domains
+  per step, don't share one blanket except.
 
 ### Payments
 - Amount is derived server-side from `PLAN_SPECS` — never trust the client.
