@@ -9,7 +9,7 @@ from app.modules.auth.schemas import SignUpRequest
 
 _BASE = dict(
     full_name="Test Artist", artist_name="Testy", phone="9876543210",
-    email="test@example.com", password="password123",
+    email="test@example.com", password="Password123",
 )
 
 

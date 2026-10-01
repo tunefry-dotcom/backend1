@@ -1,6 +1,16 @@
 from pydantic import BaseModel, EmailStr, field_validator
 
 
+def _validate_password_complexity(v: str) -> str:
+    if len(v) < 8:
+        raise ValueError("Password must be at least 8 characters")
+    if not any(c.isupper() for c in v):
+        raise ValueError("Password must contain at least one uppercase letter")
+    if not any(c.islower() for c in v):
+        raise ValueError("Password must contain at least one lowercase letter")
+    return v
+
+
 class SignUpRequest(BaseModel):
     full_name: str
     artist_name: str
@@ -36,9 +46,7 @@ class SignUpRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters")
-        return v
+        return _validate_password_complexity(v)
 
 
 class LoginRequest(BaseModel):
@@ -56,6 +64,4 @@ class ResetPasswordRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters")
-        return v
+        return _validate_password_complexity(v)

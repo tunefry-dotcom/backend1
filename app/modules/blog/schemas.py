@@ -76,6 +76,7 @@ class PostSummary(BaseModel):
     author_type: AuthorType
     author_name: str
     cover_image_key: Optional[str] = None
+    excerpt: Optional[str] = None
     is_featured: bool
     is_popular: bool
     published_at: Optional[str] = None

@@ -224,16 +224,32 @@ already returns `created_at` and `data.go_live_date` verbatim.
 - **Signup does NOT use `auth.sign_up`.** Supabase's built-in SMTP hangs 30s+
   on this project. Instead: (1) `admin.create_user` (no email) → (2)
   `admin.generate_link(type="signup")` → (3) send via **Resend HTTP API**
-  (`core/email.py`, async httpx). Duplicate emails detected from the
-  `admin.create_user` error message (`_is_duplicate_email_error`). Rolls back
-  user if email send fails.
+  (`core/email.py`, async httpx). Duplicate emails detected via
+  `_is_duplicate_email_error` — checks the SDK's structured
+  `AuthApiError.code` first (`email_exists`/`user_already_exists`/
+  `identity_already_exists`), falling back to substring matching on the
+  error message only for exceptions without a `.code`. Rolls back user if
+  email send fails.
+- **Password complexity** — self-serve `SignUpRequest.password` and
+  `ResetPasswordRequest.password` (`app/modules/auth/schemas.py`) both require
+  ≥8 chars + at least one uppercase + at least one lowercase letter
+  (`_validate_password_complexity`), 422 otherwise. Scoped to these two
+  schemas only — admin-driven password paths in `app/modules/admin/router.py`
+  (`admin_create_user`, `set_user_password`) deliberately stay at the old
+  6-char minimum with no complexity rule.
 - **Email confirmation** — `token_hash` query-param flow. Link points to
   `{OAUTH_CALLBACK_BASE_URL}/auth/confirm?token_hash=…&type=email`; server
   verifies with `auth.verify_otp(...)`. OTP type must be `"email"` (not
   `"signup"` — that's deprecated).
 - **Password reset** — same Resend flow; token minted via
-  `admin.generate_link(type="recovery")`. Failures swallowed (always 202) to
-  avoid user enumeration.
+  `admin.generate_link(type="recovery")`. `forgot_password()` deliberately
+  carves out one exception to the usual swallow-everything anti-enumeration
+  pattern: `AuthApiError.code == "user_not_found"` → 404 "No account found
+  with this email address." (confirmed account existence by request). Every
+  other failure (Resend errors, rate limits, any other Supabase error) still
+  swallows into the generic 202. `except AuthApiError` is ordered before the
+  generic `except Exception` — reversing that order would silently eat the
+  404 case too, since `AuthApiError` is itself an `Exception` subclass.
 - Supabase GoTrue client timeout raised to `SUPABASE_HTTP_TIMEOUT` (30s) in
   `_apply_timeout`; sync SDK calls run via `run_in_threadpool`.
 - **Google OAuth** uses PKCE with stateless code-verifier storage: serialized
@@ -249,7 +265,7 @@ already returns `created_at` and `data.go_live_date` verbatim.
 | POST | `/auth/logout` | Clears cookies + invalidates Supabase session |
 | GET | `/auth/me` | Protected — returns CurrentUser |
 | GET | `/auth/confirm` | Email confirmation callback; sets session |
-| POST | `/auth/forgot-password` | Sends reset email via Resend (always 202) |
+| POST | `/auth/forgot-password` | Sends reset email via Resend. 202 normally; 404 if the account doesn't exist (`AuthApiError.code == "user_not_found"`) — all other failures still swallow into 202 |
 | GET | `/auth/reset-password` | Renders reset form in a temp recovery session |
 | POST | `/auth/reset-password` | Updates password, clears recovery cookies |
 | GET | `/auth/google/login` | Redirects to Google consent (PKCE) |
@@ -342,13 +358,14 @@ already returns `created_at` and `data.go_live_date` verbatim.
 | GET | `/blog/assets/{key:path}` | Public — 307 redirect to a 15-min presigned R2 GET; 404 unless `key` starts with `blog/` |
 | POST | `/blog/submit` | Protected — **consumes a publish credit first** (402 `{"error": "no_publish_credits"}` if none left — free article already used and `credits_remaining == 0`); creates a `pending` row, `author_type="artist"`. No AI call happens here — the artist's draft is stored as-is (`original_title`/`original_body`) |
 | GET | `/blog/mine?status=` | Protected — the current user's own posts (optionally filtered by status); powers `Daily.jsx`'s published-articles grid |
-| GET | `/blog/posts?category=&page=&per_page=` | Public — paginated, `status="approved"` only, `published_at DESC`, `per_page` capped at 15 |
+| GET | `/blog/posts?category=&page=&per_page=` | Public — paginated, `status="approved"` only, `published_at DESC`, `per_page` capped at 15. Each `PostSummary` now also carries `excerpt` — a whitespace-collapsed, ~140-char word-boundary-truncated preview computed in `to_summary()` from `final_body or original_body` (purely additive field; `to_detail()` inherits it unused) |
 | GET | `/blog/posts/{slug}` | Public — 404 unless `status="approved"` |
 | GET | `/blog/posts/{slug}/related?limit=` | Public — same-category posts, excludes current, newest first, `limit` capped at 12 |
 | GET | `/admin/blog/{author_type}` | Admin — `author_type` ∈ `artist`/`tunefry`; optional `?status=` filter; returns `list[AdminPost]` (includes `original_title`/`original_body` + `final_title`/`final_body`, unlike the public `PostSummary`/`PostDetail` shapes which never expose the artist's raw draft or `author_email`) |
 | POST | `/admin/blog/images` | Admin — cover-image upload for the Tunefry compose flow (called up to twice, for the optional 2nd inline image) |
 | POST | `/admin/blog/rewrite` | Admin — body `{title, body}` → `ai.rewrite_article()` (OpenAI) → `{title, body}`. Used from both the Artist review tab (rewriting a submitted draft) and the Tunefry compose tab. 503 if `OPENAI_API_KEY` unset; 502 on an OpenAI API error (no silent fallback). **Artists never see this endpoint or its output** — admin-only, and the rewritten copy only reaches the public site if the admin then approves/publishes it |
 | PATCH | `/admin/blog/{post_id}` | Admin — reviews an **artist** submission. Body `{status: "approved"\|"declined", admin_note?, final_title?, final_body?}`. `approved` requires non-empty `final_title` + `final_body` (400 otherwise — the admin must have written or AI-rewritten-and-edited the publishable copy; the artist's own draft is never auto-published verbatim). `declined` requires a non-empty `admin_note` (400 otherwise), shown to the artist. Approve sets `published_at=now()`. Either outcome inserts one personal notification row (`recipient_email` = that artist's email) — this artist only, never a broadcast |
+| DELETE | `/admin/blog/{post_id}` | Admin — deletes a `blog_posts` row outright (any status — approved, declined, or pending). Best-effort R2 cleanup of `cover_image_keys` afterward (`delete_keys()`, logged-but-non-blocking on failure, same accepted-risk pattern as `delete_submissions`) — safe unconditionally here since blog image keys are always a fresh `uuid4().hex`-named object per upload, never shared across rows (unlike submission R2 keys). 404 via `ReviewError("not_found")` if the id doesn't exist |
 | POST | `/admin/blog/tunefry` | Admin — direct-publish: body `{final_title, final_body, category, cover_image_keys}` (1–2 keys); creates `author_type="tunefry"`, `status="approved"`, `published_at=now()` immediately — no separate review step, since the admin already composed + rewrote + edited before calling this |
 | PATCH | `/admin/blog/{post_id}/flags` | Admin — body `{is_featured?, is_popular?}`; 400 if the post isn't `status="approved"`. Backs the "Tunefry Daily — Featured / Popular" curation card in `MasterHomeView` (`SecretPanel.jsx`) |
 
@@ -368,6 +385,17 @@ approval).
 columns are never overwritten. `AdminPost` (admin-only response shape) exposes both the original
 draft and the final admin-edited copy side by side; the public `PostSummary`/`PostDetail` shapes
 expose only `title`/`body` (aliased from whichever is published) and never `author_email`.
+
+**AI rewrite prompt (`app/modules/blog/ai.py`)**: the system prompt bans comma-chained "X, and Y,"
+constructions (not just the earlier-banned "not only...but also"/stacked-"which" tics), and
+`random.choice`s one of six `_TUNEFRY_ANGLES` per call to naturally weave a differently-phrased
+Tunefry/artist-hustle mention into the body each time (never a fixed repeated blurb). The body
+must land in **200–1000 words**; `rewrite_article()` enforces this with exactly one corrective
+retry (`_call_openai()` extracted as a reusable helper) if the first attempt's word count falls
+outside that range — the retry names the actual count and required range. If the retry also
+misses the range, or the retry call itself errors, the function returns the best available output
+anyway (never raises) — the admin always reviews/hand-edits `final_title`/`final_body` before
+approving, so an off-range draft is a quality nit, not a correctness bug.
 
 ### Earnings / Withdrawals
 | Method | Path | Notes |

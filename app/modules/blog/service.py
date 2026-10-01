@@ -10,7 +10,7 @@ from fastapi import HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
-from app.core.r2_client import upload_bytes
+from app.core.r2_client import delete_keys, upload_bytes
 from app.core.supabase_client import get_service_client
 
 _log = logging.getLogger(__name__)
@@ -90,6 +90,13 @@ async def save_blog_image(file: UploadFile) -> str:
 
 # --- Row -> response mapping ------------------------------------------------
 
+def _make_excerpt(text: str, limit: int = 140) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "…"
+
+
 def to_summary(row: dict[str, Any]) -> dict[str, Any]:
     cover_keys = row.get("cover_image_keys") or []
     return {
@@ -100,6 +107,7 @@ def to_summary(row: dict[str, Any]) -> dict[str, Any]:
         "author_type": row["author_type"],
         "author_name": row.get("author_name") or "",
         "cover_image_key": cover_keys[0] if cover_keys else None,
+        "excerpt": _make_excerpt(row.get("final_body") or row.get("original_body") or ""),
         "is_featured": bool(row.get("is_featured")),
         "is_popular": bool(row.get("is_popular")),
         "published_at": row.get("published_at"),
@@ -238,6 +246,21 @@ def review_post(
     res = svc.table(_TABLE).update(update).eq("id", post_id).execute()
     updated = (res.data or [{**row, **update}])[0]
     return to_admin(updated)
+
+
+def delete_post(post_id: str) -> None:
+    row = _get_post_row(post_id)
+    if not row:
+        raise ReviewError("not_found")
+    svc = get_service_client()
+    svc.table(_TABLE).delete().eq("id", post_id).execute()
+    if settings.r2_enabled:
+        keys = row.get("cover_image_keys") or []
+        if keys:
+            try:
+                delete_keys(keys)
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                _log.warning("Could not delete R2 keys for blog post %s: %s", post_id, exc)
 
 
 def set_flags(post_id: str, *, is_featured: Optional[bool], is_popular: Optional[bool]) -> dict[str, Any]:

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, R
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+from supabase_auth.errors import AuthApiError
 
 from app.core.config import settings
 from app.core.email import confirmation_email_html, password_reset_email_html, send_email
@@ -55,9 +56,17 @@ _DUPLICATE_EMAIL_MSG = (
 # ---------------------------------------------------------------------------
 
 
-def _is_duplicate_email_error(msg: str) -> bool:
-    """Detect Supabase's 'email already registered' error across message variants."""
-    m = msg.lower()
+_DUPLICATE_EMAIL_CODES = {"email_exists", "user_already_exists", "identity_already_exists"}
+
+
+def _is_duplicate_email_error(exc: Exception) -> bool:
+    """Detect Supabase's 'email already registered' error. Prefers the SDK's
+    stable `.code` field (AuthApiError); falls back to substring matching for
+    exceptions that don't carry one."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        return code in _DUPLICATE_EMAIL_CODES
+    m = str(exc).lower()
     return (
         "already been registered" in m
         or "already registered" in m
@@ -94,10 +103,9 @@ async def signup(body: SignUpRequest) -> dict[str, Any]:
             },
         )
     except Exception as exc:
-        msg = str(exc)
-        if _is_duplicate_email_error(msg):
+        if _is_duplicate_email_error(exc):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_DUPLICATE_EMAIL_MSG)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     user = created.user
     if not user:
@@ -364,8 +372,15 @@ async def forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
                 subject="Reset your Tunefry password",
                 html_body=password_reset_email_html(reset_url),
             )
+    except AuthApiError as exc:
+        if exc.code == "user_not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No account found with this email address.",
+            )
+        # any other AuthApiError (rate limit, provider disabled, etc.) — swallow as before
     except Exception:
-        pass  # swallow to avoid user enumeration
+        pass  # Resend failures, network errors, etc. — swallow as before
     return {"message": "If that email is registered you will receive a reset link shortly."}
 
 

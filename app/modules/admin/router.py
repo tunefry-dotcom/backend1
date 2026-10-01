@@ -2057,6 +2057,20 @@ async def admin_review_blog_post(post_id: str, body: AdminReviewRequest) -> Admi
     return AdminPost(**row)
 
 
+@router.delete("/blog/{post_id}", dependencies=[Depends(_require_admin)])
+async def admin_delete_blog_post(post_id: str) -> dict:
+    try:
+        blog_service.delete_post(post_id)
+    except ReviewError as exc:
+        raise _blog_review_error_to_http(exc) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not delete post: {exc}",
+        ) from exc
+    return {"ok": True}
+
+
 @router.post("/blog/tunefry", dependencies=[Depends(_require_admin)])
 async def admin_publish_tunefry_post(body: AdminTunefryPublishRequest) -> AdminPost:
     try:
