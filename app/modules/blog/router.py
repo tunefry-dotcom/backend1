@@ -144,10 +144,11 @@ async def my_posts(
 @router.get("/posts", response_model=PaginatedPosts)
 async def list_posts(
     category: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=12, ge=1, le=15),
 ) -> PaginatedPosts:
-    return PaginatedPosts(**blog_service.list_public_posts(category=category, page=page, per_page=per_page))
+    return PaginatedPosts(**blog_service.list_public_posts(category=category, q=q, page=page, per_page=per_page))
 
 
 @router.get("/posts/{slug}", response_model=PostDetail)

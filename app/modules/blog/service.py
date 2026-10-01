@@ -286,16 +286,26 @@ def set_flags(post_id: str, *, is_featured: Optional[bool], is_popular: Optional
 
 # --- Reads ------------------------------------------------------------
 
-def list_public_posts(*, category: Optional[str], page: int, per_page: int) -> dict[str, Any]:
+def list_public_posts(*, category: Optional[str], q: Optional[str] = None, page: int, per_page: int) -> dict[str, Any]:
     svc = get_service_client()
     per_page = max(1, min(per_page, 15))
     page = max(1, page)
 
-    q = svc.table(_TABLE).select("*").eq("status", "approved")
+    query = svc.table(_TABLE).select("*").eq("status", "approved")
     if category:
-        q = q.eq("category", category)
-    res = q.order("published_at", desc=True).execute()
+        query = query.eq("category", category)
+    res = query.order("published_at", desc=True).execute()
     rows = res.data or []
+
+    if q and q.strip():
+        term = q.strip().lower()
+
+        def _matches(row: dict) -> bool:
+            title = (row.get("final_title") or row.get("original_title") or "").lower()
+            body = (row.get("final_body") or row.get("original_body") or "").lower()
+            return term in title or term in body
+
+        rows = [r for r in rows if _matches(r)]
 
     total = len(rows)
     total_pages = max(1, -(-total // per_page))
