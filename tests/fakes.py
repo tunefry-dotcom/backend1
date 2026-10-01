@@ -26,6 +26,9 @@ class FakeQuery:
     def eq(self, *a, **k):
         return self
 
+    def is_(self, *a, **k):
+        return self
+
     def limit(self, *a, **k):
         return self
 
@@ -55,11 +58,32 @@ class FakeQuery:
         return self
 
     def upsert(self, row, *a, **k):
+        # Single-row-per-key tables (e.g. blog_publish_credits): merge into
+        # the existing row so a later execute() on this same FakeQuery
+        # reflects the write, instead of staying stale. Bulk upserts (a list
+        # of rows, e.g. song_stats import) are left as a no-op against
+        # _data, matching the pre-existing behavior every current test
+        # asserting on post-upsert reads (recompute_balance, etc.) already
+        # depends on — only last_upsert is recorded for inspection.
         self.last_upsert = row
+        if isinstance(row, list):
+            return self
+        if isinstance(self._data, list):
+            self._data = [{**self._data[0], **row}] if self._data else [row]
+        else:
+            self._data = row
         return self
 
     def update(self, row, *a, **k):
+        # Real Postgrest returns the updated row(s) from .execute(); mirror
+        # that by merging into whatever rows are currently queued, so
+        # service-layer code that reads res.data after an update sees the
+        # change rather than the pre-update snapshot.
         self.last_update = row
+        if isinstance(self._data, list):
+            self._data = [{**item, **row} for item in self._data]
+        else:
+            self._data = {**self._data, **row}
         return self
 
     def execute(self):

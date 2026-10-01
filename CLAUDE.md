@@ -47,7 +47,23 @@ available via `fastapi`/`starlette`, no extra install) exercises endpoints
 with `app.dependency_overrides` swapping in a fake `CurrentUser` for
 `get_current_user`. There is **no live Supabase project or seeded test DB** —
 these are logic-level unit/endpoint-contract tests, not full integration
-tests against real Postgres.
+tests against real Postgres. `FakeQuery.update()` merges the written fields
+into whatever row(s) are already queued for that table, and `.upsert()` does
+the same **only when called with a single dict** (single-row-per-key tables,
+e.g. `blog_publish_credits`) — so a service function that reads `res.data`
+right after writing (the `update(...).execute()` → `res.data[0]` pattern used
+by `blog/service.py`'s `review_post`/`set_flags`, or `credits.py`'s
+`consume_publish_credit`) sees the post-write row, not a stale snapshot.
+A **list-input** `.upsert()` (bulk upserts, e.g. the Excel import's
+`song_stats.upsert(rows_to_upsert, ...)`) is left as a no-op against `_data`
+— only `last_upsert` is recorded — matching the pre-existing behavior that
+`test_song_stats_import.py`'s balance assertions already depend on (the fake
+upsert must not feed back into a later `recompute_balance()` read of the same
+table). `.insert()` still just records `last_insert` without mutating
+`_data`. `.is_()` (e.g. `.is_("recipient_email", "null")`) is a no-op
+passthrough like `.eq()`/`.limit()`/`.order()` — same "the fake doesn't
+actually filter, tests must pre-supply the exact rows a real Postgrest query
+would return" rule that already applies to every other filter method.
 
 ```bash
 .\venv\Scripts\activate
@@ -107,8 +123,17 @@ app/
     referrals/
       service.py              # referral_code gen, resolve_referrer, credit_referral (10% commission)
       router.py               # GET /referrals/me
+    blog/
+      router.py               # /blog/* — categories, credits, submit, mine, posts, assets
+      service.py              # slugify, row↔response mapping, create/list/review query helpers
+      credits.py              # blog_publish_credits ledger (free-article + paid packs)
+      payment.py              # Razorpay order/verify for credit packs (separate from billing/payment.py)
+      ai.py                   # OpenAI rewrite_article(title, body) — admin-triggered only
+      schemas.py               # CreditStatus, PostSummary/PostDetail, AdminPost, etc.
+    notifications/
+      router.py               # GET /notifications/announcements — merges broadcasts + personal rows
     admin/
-      router.py               # /admin/* (X-Admin-Secret header required)
+      router.py               # /admin/* (X-Admin-Secret header required) — includes /admin/blog/*
 templates/
   confirm.html                # email-confirmation result page (Jinja2)
   reset_password.html         # set-new-password form (Jinja2)
@@ -130,6 +155,10 @@ src/
     profile.js                # getProfile(), updateProfile()
     referrals.js              # getMyReferrals() -> GET /referrals/me
     r2upload.js               # validates file type/dimensions; calls /api/upload/r2
+    blog.js                   # Tunefry Daily: getCategories/getPosts/getPostBySlug/
+                               #   getRelatedPosts/getMyPosts/uploadBlogImage/submitArticle/
+                               #   getCreditStatus/createCreditOrder/verifyCreditPayment/
+                               #   buyCreditPack (Razorpay checkout, same pattern as payment.js)
   components/
     ProtectedRoute.jsx        # spinner while loading; redirects unauthenticated
     PlanGate.jsx              # blocks feature if not confirmed or wrong plan
@@ -300,7 +329,45 @@ already returns `created_at` and `data.go_live_date` verbatim.
 ### Notifications
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/notifications/announcements` | Protected (auth cookie required); returns last 20 admin broadcast rows ordered by `created_at DESC` |
+| GET | `/notifications/announcements` | Protected (auth cookie required); merges two queries — broadcasts (`recipient_email IS NULL`) + this user's own personal rows (`recipient_email = current_user.email`, lowercased) — sorted `created_at DESC`, capped at 20 total. Blog approve/decline notifications are personal rows inserted directly by `blog/service.py`, not via `POST /admin/notifications` (which stays broadcast-only). |
+
+### Tunefry Daily (blog)
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/blog/categories` | Public — fixed 4-category list `[{id, label}]` (`artist_journey`, `song_release`, `informative`, `success_story`) |
+| GET | `/blog/credits/me` | Protected — `{free_article_used, credits_remaining, can_publish}`; drives the `AiBlog.jsx` paywall |
+| POST | `/blog/credits/order` | Protected — body `{pack: "single"\|"bundle_20"}` → Razorpay order; amount server-derived (₹49 / ₹799, `PAYMENT_AMOUNT_DIVISOR`-aware) |
+| POST | `/blog/credits/verify` | Protected — verifies HMAC-SHA256; inserts `blog_credit_purchases` row (unique `razorpay_payment_id` = replay guard) then grants credits. On a post-insert grant failure, returns `200 {"credited": false, "support_note": "..."}` rather than a 5xx — the purchase is never left silently unresolved |
+| POST | `/blog/images` | Protected — artist's own single cover-image upload (jpeg/png/webp, ≤5 MB) → `{"key": "blog/<uuid>.<ext>"}` |
+| GET | `/blog/assets/{key:path}` | Public — 307 redirect to a 15-min presigned R2 GET; 404 unless `key` starts with `blog/` |
+| POST | `/blog/submit` | Protected — **consumes a publish credit first** (402 `{"error": "no_publish_credits"}` if none left — free article already used and `credits_remaining == 0`); creates a `pending` row, `author_type="artist"`. No AI call happens here — the artist's draft is stored as-is (`original_title`/`original_body`) |
+| GET | `/blog/mine?status=` | Protected — the current user's own posts (optionally filtered by status); powers `Daily.jsx`'s published-articles grid |
+| GET | `/blog/posts?category=&page=&per_page=` | Public — paginated, `status="approved"` only, `published_at DESC`, `per_page` capped at 15 |
+| GET | `/blog/posts/{slug}` | Public — 404 unless `status="approved"` |
+| GET | `/blog/posts/{slug}/related?limit=` | Public — same-category posts, excludes current, newest first, `limit` capped at 12 |
+| GET | `/admin/blog/{author_type}` | Admin — `author_type` ∈ `artist`/`tunefry`; optional `?status=` filter; returns `list[AdminPost]` (includes `original_title`/`original_body` + `final_title`/`final_body`, unlike the public `PostSummary`/`PostDetail` shapes which never expose the artist's raw draft or `author_email`) |
+| POST | `/admin/blog/images` | Admin — cover-image upload for the Tunefry compose flow (called up to twice, for the optional 2nd inline image) |
+| POST | `/admin/blog/rewrite` | Admin — body `{title, body}` → `ai.rewrite_article()` (OpenAI) → `{title, body}`. Used from both the Artist review tab (rewriting a submitted draft) and the Tunefry compose tab. 503 if `OPENAI_API_KEY` unset; 502 on an OpenAI API error (no silent fallback). **Artists never see this endpoint or its output** — admin-only, and the rewritten copy only reaches the public site if the admin then approves/publishes it |
+| PATCH | `/admin/blog/{post_id}` | Admin — reviews an **artist** submission. Body `{status: "approved"\|"declined", admin_note?, final_title?, final_body?}`. `approved` requires non-empty `final_title` + `final_body` (400 otherwise — the admin must have written or AI-rewritten-and-edited the publishable copy; the artist's own draft is never auto-published verbatim). `declined` requires a non-empty `admin_note` (400 otherwise), shown to the artist. Approve sets `published_at=now()`. Either outcome inserts one personal notification row (`recipient_email` = that artist's email) — this artist only, never a broadcast |
+| POST | `/admin/blog/tunefry` | Admin — direct-publish: body `{final_title, final_body, category, cover_image_keys}` (1–2 keys); creates `author_type="tunefry"`, `status="approved"`, `published_at=now()` immediately — no separate review step, since the admin already composed + rewrote + edited before calling this |
+| PATCH | `/admin/blog/{post_id}/flags` | Admin — body `{is_featured?, is_popular?}`; 400 if the post isn't `status="approved"`. Backs the "Tunefry Daily — Featured / Popular" curation card in `MasterHomeView` (`SecretPanel.jsx`) |
+
+**Publish-credit model**: every artist gets exactly **one free article, lifetime** (not
+monthly/recurring) — tracked as `blog_publish_credits.free_article_used`. After that,
+`credits_remaining` (bought via `POST /blog/credits/order` + `/verify`, packs `single`=₹49→1
+credit or `bundle_20`=₹799→20 credits) must be > 0 to submit. A credit/the free-article flag is
+consumed at **submission time** (`POST /blog/submit`), not at admin approval — this is a
+per-submission publishing fee, independent of whether the admin later approves or declines it.
+No distributed locking on the read-modify-write credit decrement (same accepted-risk class as
+`earnings/service.py`'s `recompute_balance` — worst case with concurrent tabs is one extra
+pending post, never a money-loss bug since the artist already paid for the credit, not for
+approval).
+
+**AI rewrite boundary**: `ai.rewrite_article()` is called ONLY from the two admin endpoints above
+— there is no artist-facing rewrite endpoint, and the artist's `original_title`/`original_body`
+columns are never overwritten. `AdminPost` (admin-only response shape) exposes both the original
+draft and the final admin-edited copy side by side; the public `PostSummary`/`PostDetail` shapes
+expose only `title`/`body` (aliased from whichever is published) and never `author_email`.
 
 ### Earnings / Withdrawals
 | Method | Path | Notes |
@@ -396,6 +463,9 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0010_referrals.sql` | `profiles.referral_code TEXT UNIQUE` (lazily populated, not backfilled), `public.referrals` (referrer_user_id, referred_user_id UNIQUE, referral_code_used), `public.referral_earnings` (immutable audit ledger: referrer_user_id/email, referred_user_id, plan, amount, source, payment_ref). See "Refer & Earn" under Endpoints for the crediting model. |
 | `0011_fx_rate_setting.sql` | `public.fx_rate_settings` — singleton table (same shape as `0003_home_content.sql`), `id integer PK`, `usd_to_inr numeric(10,4)`, `updated_at`. No seed row (`GET /admin/fx-rate` returns nulls until an admin sets it once via `PUT`). RLS enabled, no policies — service-role only. Backs the centrally-set conversion rate used by `POST /admin/song-stats/import` (see Admin endpoints) — set once, applies to every artist's uploads automatically. |
 | `0012_balance_adjustments.sql` | `public.balance_adjustments` (immutable audit ledger for manual admin balance corrections: `id`, nullable `user_id`, `user_email`, signed `amount NUMERIC(20,10)` — positive = credit, negative = debit — required `comment`, `created_at`). Index on `user_email`. RLS: read-own; service-role writes only. Same immutable-ledger pattern as `referral_earnings` (0010) — `recompute_balance()` and `ingest_royalty_report.py` both sum it into `total_earned` so a manual adjustment survives every future recompute instead of being overwritten. See `POST/DELETE /admin/balance-adjustments` under Admin endpoints. |
+| `0013_blog_posts.sql` | `public.blog_posts` — Tunefry Daily posts. `id`, `slug` (unique index), `author_type` (`artist`\|`tunefry`), `author_email`, `author_name`, `category` (`artist_journey`\|`song_release`\|`informative`\|`success_story`), `status` (`pending`\|`approved`\|`declined`, default `pending`), `original_title`/`original_body` (artist's raw draft — immutable, never overwritten, doubles as the admin's AI-rewrite input), `final_title`/`final_body` (nullable until approved; the **only** copy ever rendered publicly), `cover_image_keys JSONB` (ordered array — index 0 = card thumbnail + article hero, index 1 = optional Tunefry-only inline image, never more than 2), `admin_note`, `is_featured`/`is_popular` booleans, `reviewed_at`, `published_at`, `created_at`/`updated_at`. Indexes for public listing (`status, category, published_at DESC`), related-articles (`category, published_at DESC WHERE status='approved'`), admin tabs (`author_type, status, created_at DESC`), and "my posts" (`author_email, status, created_at DESC`). RLS: authenticated reads own rows (any status) or any approved row; anon reads approved rows only; all writes service-role only. |
+| `0014_notifications_targeting.sql` | Additive: `public.notifications.recipient_email TEXT` (nullable) + index on `(recipient_email, created_at DESC)`. `NULL` = existing broadcast behavior (shown to everyone), unchanged for every pre-migration row; non-null = personal notice shown only to that one email — used by blog approve/decline. See `GET /notifications/announcements` under Notifications endpoints. |
+| `0015_blog_publish_credits.sql` | `public.blog_publish_credits` — live per-user ledger, `user_email` PK, `free_article_used` boolean (default false), `credits_remaining` integer (default 0), `updated_at`; read-modify-write on submit/purchase, same no-distributed-locking convention as `recompute_balance()`. `public.blog_credit_purchases` — immutable audit ledger (same pattern as `referral_earnings`/`balance_adjustments`): `user_email`, `razorpay_order_id`, `razorpay_payment_id` **UNIQUE** (the replay guard — a duplicate verify call hits a unique-violation before any credit is granted twice), `pack` (`single`\|`bundle_20`), `amount_inr`, `credits_granted`, `created_at`; index on `(user_email, created_at DESC)`. Both tables RLS: authenticated reads own rows only; all writes service-role only. |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
@@ -403,6 +473,8 @@ RLS summary:
 - `song_stats` / `artist_balances` / `withdrawal_requests`: user reads own rows (by JWT email/uid); service-role writes only.
 - `home_content`: public read; service-role write.
 - `submissions`: service-role read/write only.
+- `blog_posts`: authenticated reads own rows or any approved row; anon reads approved rows only; service-role writes only.
+- `blog_publish_credits` / `blog_credit_purchases`: user reads own rows (by JWT email); service-role writes only.
 
 ## Cloudflare R2 file layout
 
@@ -411,6 +483,7 @@ RLS summary:
 {sanitized_artist}/{sanitized_release}/audio.{ext}        # single
 {sanitized_artist}/{sanitized_release}/track_01.{ext}     # album (1-based, zero-padded)
 home/{filename}                                            # home CMS images
+blog/{uuid4().hex}{ext}                                     # Tunefry Daily cover/inline images (flat, not nested — no artist/release grouping)
 ```
 
 - `sanitize_key_part()`: lowercases, strips special chars, collapses whitespace.
@@ -495,6 +568,8 @@ See `.env.example`. All required for production:
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | R2 file storage |
 | `ADMIN_SECRET` | `X-Admin-Secret` header value for `/admin/*` — use a strong random secret (≥32 chars), not a memorable password |
 | `DEV_AUTH_ENABLED` | `true` to enable dev-only endpoints (default false → 404) |
+| `OPENAI_API_KEY` | Tunefry Daily admin-triggered rewrite (`POST /admin/blog/rewrite`). Blank → `openai_enabled` false → 503. **Never paste a live key into chat/commits** — generate fresh via the OpenAI dashboard, set only as an env var. |
+| `OPENAI_MODEL` | Default `gpt-4o-mini`; override to point the rewrite call at a different model |
 
 Never commit real values. Rotate Razorpay keys via the dashboard if accidentally
 exposed. `SERVICE_ROLE_KEY` is server-only — never ship to client.

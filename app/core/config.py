@@ -119,6 +119,14 @@ class Settings(BaseSettings):
     def razorpay_enabled(self) -> bool:
         return bool(self.razorpay_key_id and self.razorpay_key_secret)
 
+    # OpenAI (Tunefry Daily blog — admin-triggered draft rewriting only).
+    openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", validation_alias="OPENAI_MODEL")
+
+    @property
+    def openai_enabled(self) -> bool:
+        return bool(self.openai_api_key)
+
     @property
     def jwks_url(self) -> str:
         return f"{self.supabase_url}/auth/v1/.well-known/jwks.json"

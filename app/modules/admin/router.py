@@ -25,6 +25,17 @@ from app.core.r2_client import delete_keys, presign_get, upload_bytes
 from app.core.supabase_client import get_service_client
 from app.modules.billing.plans import Plan, get_spec
 from app.modules.billing.service import assign_plan
+from app.modules.blog import ai as blog_ai
+from app.modules.blog import service as blog_service
+from app.modules.blog.schemas import (
+    AdminFlagsRequest,
+    AdminPost,
+    AdminReviewRequest,
+    AdminTunefryPublishRequest,
+    RewriteRequest,
+    RewriteResponse,
+)
+from app.modules.blog.service import ReviewError
 from app.modules.home import service as home_service
 from app.modules.home.schemas import HomeContent
 from app.modules.earnings.service import get_balance, recompute_balance
@@ -1954,3 +1965,124 @@ async def admin_import_song_stats(
         "balance": balance,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tunefry Daily (blog)
+# ---------------------------------------------------------------------------
+
+_BLOG_REVIEW_ERROR_DETAIL: dict[str, str] = {
+    "not_found": "Post not found.",
+    "final_copy_required": "Both a final title and final body are required to approve.",
+    "admin_note_required": "A comment is required to decline.",
+    "not_approved": "Only approved posts can be featured/popular.",
+}
+
+
+def _blog_review_error_to_http(exc: ReviewError) -> HTTPException:
+    code = status.HTTP_404_NOT_FOUND if str(exc) == "not_found" else status.HTTP_400_BAD_REQUEST
+    detail = _BLOG_REVIEW_ERROR_DETAIL.get(str(exc), str(exc))
+    return HTTPException(status_code=code, detail=detail)
+
+
+def _notify_artist_blog_review(email: str, title: str, body: str) -> None:
+    if not email:
+        return
+    try:
+        get_service_client().table("notifications").insert(
+            {"title": title, "body": body, "recipient_email": email}
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 - best-effort, never blocks the review response
+        _log.warning("Could not insert blog review notification for %s: %s", email, exc)
+
+
+@router.get("/blog/{author_type}", dependencies=[Depends(_require_admin)])
+async def admin_list_blog_posts(
+    author_type: Literal["artist", "tunefry"],
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+) -> list[AdminPost]:
+    try:
+        rows = blog_service.list_admin_posts(author_type, status_filter)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not fetch posts: {exc}",
+        ) from exc
+    return [AdminPost(**r) for r in rows]
+
+
+@router.post("/blog/images", dependencies=[Depends(_require_admin)])
+async def admin_upload_blog_image(file: UploadFile = File(...)) -> dict[str, str]:
+    key = await blog_service.save_blog_image(file)
+    return {"key": key}
+
+
+@router.post("/blog/rewrite", dependencies=[Depends(_require_admin)])
+async def admin_rewrite_blog_post(body: RewriteRequest) -> RewriteResponse:
+    new_title, new_body = await blog_ai.rewrite_article(body.title, body.body)
+    return RewriteResponse(title=new_title, body=new_body)
+
+
+@router.patch("/blog/{post_id}", dependencies=[Depends(_require_admin)])
+async def admin_review_blog_post(post_id: str, body: AdminReviewRequest) -> AdminPost:
+    try:
+        row = blog_service.review_post(
+            post_id,
+            status_value=body.status,
+            admin_note=body.admin_note,
+            final_title=body.final_title,
+            final_body=body.final_body,
+        )
+    except ReviewError as exc:
+        raise _blog_review_error_to_http(exc) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not review post: {exc}",
+        ) from exc
+
+    email = (row.get("author_email") or "").lower()
+    if body.status == "approved":
+        _notify_artist_blog_review(
+            email,
+            "Your Tunefry Daily article was approved",
+            f'"{row.get("final_title")}" is now live on Tunefry Daily.',
+        )
+    else:
+        _notify_artist_blog_review(
+            email,
+            "Your Tunefry Daily article was declined",
+            body.admin_note,
+        )
+    return AdminPost(**row)
+
+
+@router.post("/blog/tunefry", dependencies=[Depends(_require_admin)])
+async def admin_publish_tunefry_post(body: AdminTunefryPublishRequest) -> AdminPost:
+    try:
+        row = blog_service.create_tunefry_post(
+            final_title=body.final_title,
+            final_body=body.final_body,
+            category=body.category,
+            cover_image_keys=body.cover_image_keys,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not publish post: {exc}",
+        ) from exc
+    return AdminPost(**row)
+
+
+@router.patch("/blog/{post_id}/flags", dependencies=[Depends(_require_admin)])
+async def admin_set_blog_flags(post_id: str, body: AdminFlagsRequest) -> AdminPost:
+    try:
+        row = blog_service.set_flags(post_id, is_featured=body.is_featured, is_popular=body.is_popular)
+    except ReviewError as exc:
+        raise _blog_review_error_to_http(exc) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not update flags: {exc}",
+        ) from exc
+    return AdminPost(**row)
