@@ -9,6 +9,9 @@ AuthorType = Literal["artist", "tunefry"]
 PostStatus = Literal["pending", "approved", "declined"]
 CreditPack = Literal["single", "bundle_20"]
 
+# Long-form guides pasted by admins exceed the old 20k cap; one shared limit for every body field.
+MAX_BODY_CHARS = 60000
+
 CATEGORY_LABELS: dict[str, str] = {
     "artist_journey": "Artist Journey",
     "song_release": "Song Release",
@@ -61,7 +64,7 @@ class CreditVerifyResponse(BaseModel):
 
 class SubmitArticleRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    body: str = Field(min_length=1, max_length=20000)
+    body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     category: Category
     cover_image_key: str = Field(min_length=1)
 
@@ -99,7 +102,7 @@ class PaginatedPosts(BaseModel):
 
 class RewriteRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    body: str = Field(min_length=1, max_length=20000)
+    body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
 
 
 class RewriteResponse(BaseModel):
@@ -111,12 +114,12 @@ class AdminReviewRequest(BaseModel):
     status: Literal["approved", "declined"]
     admin_note: str = Field(default="", max_length=500)
     final_title: Optional[str] = Field(default=None, max_length=200)
-    final_body: Optional[str] = Field(default=None, max_length=20000)
+    final_body: Optional[str] = Field(default=None, max_length=MAX_BODY_CHARS)
 
 
 class AdminTunefryPublishRequest(BaseModel):
     final_title: str = Field(min_length=1, max_length=200)
-    final_body: str = Field(min_length=1, max_length=20000)
+    final_body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     category: Category
     cover_image_keys: list[str] = Field(min_length=1, max_length=2)
 
