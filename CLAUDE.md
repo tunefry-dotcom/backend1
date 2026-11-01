@@ -8,7 +8,7 @@ Guidance for Claude Code when working in this repository.
 releases, upload audio masters + cover art, submit for distribution to
 DSPs/stores, manage subscriptions, and get analytics. This repo is the
 **FastAPI backend**; the frontend is a separate React SPA at
-`C:\Users\ViditVaibhav\Desktop\tunefry frontend`.
+`C:\Users\ViditVaibhav\Desktop\tunefry frontend\TUNEFRY-FRONTEND`.
 
 ## Stack
 
@@ -143,7 +143,16 @@ supabase/
 
 ## Frontend structure (separate repo)
 
-Path: `C:\Users\ViditVaibhav\Desktop\tunefry frontend`
+Path: `C:\Users\ViditVaibhav\Desktop\tunefry frontend\TUNEFRY-FRONTEND`
+(note the nested `TUNEFRY-FRONTEND` folder — it holds `index.html`, `src/`, `package.json`, and its own `.git`)
+
+**Google Ads tag (gtag.js, ID `AW-18507080031`)** — pasted verbatim into the
+`<head>` of `index.html` (right after `<meta charset>`), NOT in React code. The
+SPA has a single HTML shell, so it loads exactly once on every route. There is
+no CSP in `index.html`/`vercel.json`, so nothing else needs allow-listing. Do
+not add a second copy in a component or it will double-count. Ships to prod
+only after a Vercel redeploy. EEA consent mode is not set up (not needed for
+the India audience; Google's console prompts about it optionally).
 
 ```
 src/
