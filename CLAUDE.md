@@ -146,6 +146,11 @@ supabase/
 Path: `C:\Users\ViditVaibhav\Desktop\tunefry frontend\TUNEFRY-FRONTEND`
 (note the nested `TUNEFRY-FRONTEND` folder — it holds `index.html`, `src/`, `package.json`, and its own `.git`)
 
+**Google Analytics 4 (`G-LJLRGNJHSP`)** — added as a second `gtag('config', ...)`
+line in the same `index.html` snippet (no second `<script src>`). SPA route
+changes are auto-tracked by GA4 Enhanced measurement. Custom events
+(`sign_up`, `purchase`) are not wired yet.
+
 **Google Ads tag (gtag.js, ID `AW-18507080031`)** — pasted verbatim into the
 `<head>` of `index.html` (right after `<meta charset>`), NOT in React code. The
 SPA has a single HTML shell, so it loads exactly once on every route. There is
