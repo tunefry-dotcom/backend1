@@ -19,7 +19,13 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.modules.billing.plans import Plan, get_spec
+from app.modules.billing.plans import (
+    DIWALI_OFFER_LABEL,
+    Plan,
+    get_spec,
+    offer_pct,
+    offer_price_inr,
+)
 
 _RAZORPAY_BASE = "https://api.razorpay.com/v1"
 
@@ -40,7 +46,7 @@ def amount_paise(plan: Plan) -> int:
     ₹1439 with divisor 100 → 143900 // 100 = 1439 paise = ₹14.39.
     With divisor 1 → 143900 paise = ₹1439 (production).
     """
-    price_inr = get_spec(plan).price_inr
+    price_inr = offer_price_inr(plan)  # Diwali offer applied (list price if none)
     divisor = max(1, settings.payment_amount_divisor)
     return (price_inr * 100) // divisor
 
@@ -59,7 +65,13 @@ def create_order(user_id: str, plan: Plan) -> dict[str, Any]:
                 "amount": amount,
                 "currency": "INR",
                 "receipt": f"tf_{plan.value}_{uuid.uuid4().hex[:12]}",
-                "notes": {"user_id": user_id, "plan": plan.value},
+                "notes": {
+                    "user_id": user_id,
+                    "plan": plan.value,
+                    "list_price_inr": str(spec.price_inr),
+                    "discount_pct": str(offer_pct(plan)),
+                    "offer": DIWALI_OFFER_LABEL if offer_pct(plan) else "",
+                },
             },
             timeout=10,
         )
@@ -77,6 +89,8 @@ def create_order(user_id: str, plan: Plan) -> dict[str, Any]:
         "key_id": settings.razorpay_key_id,
         "plan": plan.value,
         "plan_name": spec.name,
+        "list_price_inr": spec.price_inr,
+        "offer_pct": offer_pct(plan),
     }
 
 
@@ -124,3 +138,7 @@ def verify_payment(
         raise PaymentError("Order does not match the authenticated user or plan.")
     if order.get("status") != "paid":
         raise PaymentError("Order is not marked paid.")
+    # The order amount must equal what the server would charge for this plan now.
+    # (Orders created before the offer launched, or with a tampered amount, fail.)
+    if order.get("amount") != amount_paise(plan):
+        raise PaymentError("Order amount does not match the plan price.")

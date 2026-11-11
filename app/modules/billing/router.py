@@ -27,12 +27,15 @@ from app.core.supabase_client import get_supabase
 from app.modules.auth.cookies import set_session_cookies
 from app.modules.auth.dependencies import CurrentUser, get_current_user
 from app.modules.billing.plans import (
+    DIWALI_OFFER_LABEL,
     PLAN_RANK,
     Feature,
     Plan,
     entitlements,
     get_spec,
     min_plan_for,
+    offer_pct,
+    offer_price_inr,
 )
 from app.modules.billing.payment import PaymentError, create_order, verify_payment
 from app.modules.billing.schemas import (
@@ -61,6 +64,9 @@ def _plan_summary(plan: Plan) -> PlanSummary:
         id=plan,
         name=spec.name,
         price_inr=spec.price_inr,
+        offer_price_inr=offer_price_inr(plan),
+        offer_pct=offer_pct(plan),
+        offer_label=DIWALI_OFFER_LABEL if offer_pct(plan) else None,
         royalty_pct=spec.royalty_pct,
         max_releases=spec.max_releases,
         max_artists=spec.max_artists,
@@ -266,7 +272,13 @@ async def verify_payment_and_upgrade(
         )
 
     try:
-        row = assign_plan(current_user.id, body.plan, payment_ref=body.razorpay_payment_id)
+        row = assign_plan(
+            current_user.id,
+            body.plan,
+            payment_ref=body.razorpay_payment_id,
+            amount_paid_inr=offer_price_inr(body.plan),
+            discount_pct=offer_pct(body.plan),
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -281,6 +293,7 @@ async def verify_payment_and_upgrade(
         plan=body.plan,
         source="payment",
         payment_ref=body.razorpay_payment_id,
+        amount_paid_inr=offer_price_inr(body.plan),
     )
 
     _refresh_session(response, refresh_token)

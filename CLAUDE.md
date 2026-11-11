@@ -508,6 +508,7 @@ All migrations are SQL files run once manually in Supabase SQL editor:
 | `0013_blog_posts.sql` | `public.blog_posts` — Tunefry Daily posts. `id`, `slug` (unique index), `author_type` (`artist`\|`tunefry`), `author_email`, `author_name`, `category` (`artist_journey`\|`song_release`\|`informative`\|`success_story`), `status` (`pending`\|`approved`\|`declined`, default `pending`), `original_title`/`original_body` (artist's raw draft — immutable, never overwritten, doubles as the admin's AI-rewrite input), `final_title`/`final_body` (nullable until approved; the **only** copy ever rendered publicly), `cover_image_keys JSONB` (ordered array — index 0 = card thumbnail + article hero, index 1 = optional Tunefry-only inline image, never more than 2), `admin_note`, `is_featured`/`is_popular` booleans, `reviewed_at`, `published_at`, `created_at`/`updated_at`. Indexes for public listing (`status, category, published_at DESC`), related-articles (`category, published_at DESC WHERE status='approved'`), admin tabs (`author_type, status, created_at DESC`), and "my posts" (`author_email, status, created_at DESC`). RLS: authenticated reads own rows (any status) or any approved row; anon reads approved rows only; all writes service-role only. |
 | `0014_notifications_targeting.sql` | Additive: `public.notifications.recipient_email TEXT` (nullable) + index on `(recipient_email, created_at DESC)`. `NULL` = existing broadcast behavior (shown to everyone), unchanged for every pre-migration row; non-null = personal notice shown only to that one email — used by blog approve/decline. See `GET /notifications/announcements` under Notifications endpoints. |
 | `0015_blog_publish_credits.sql` | `public.blog_publish_credits` — live per-user ledger, `user_email` PK, `free_article_used` boolean (default false), `credits_remaining` integer (default 0), `updated_at`; read-modify-write on submit/purchase, same no-distributed-locking convention as `recompute_balance()`. `public.blog_credit_purchases` — immutable audit ledger (same pattern as `referral_earnings`/`balance_adjustments`): `user_email`, `razorpay_order_id`, `razorpay_payment_id` **UNIQUE** (the replay guard — a duplicate verify call hits a unique-violation before any credit is granted twice), `pack` (`single`\|`bundle_20`), `amount_inr`, `credits_granted`, `created_at`; index on `(user_email, created_at DESC)`. Both tables RLS: authenticated reads own rows only; all writes service-role only. |
+| `0016_subscription_amount_paid.sql` | Additive: `subscriptions.amount_paid_inr numeric` + `discount_pct integer` (what the buyer actually paid after the Diwali offer). Idempotent (`add column if not exists`). |
 
 RLS summary:
 - `subscriptions`: user reads own row; service-role writes only.
@@ -661,6 +662,16 @@ exposed. `SERVICE_ROLE_KEY` is server-only — never ship to client.
   per step, don't share one blanket except.
 
 ### Payments
+- **Diwali Offer (10% off, added 2026-11-11)** — `billing/plans.py` has `DIWALI_OFFER_ACTIVE` /
+  `DIWALI_OFFER_PCT` / `DIWALI_OFFER_LABEL`, `offer_pct(plan)` and `offer_price_inr(plan)` (floor to whole
+  rupees; Free is never discounted). Currently hardcoded always-on; set `DIWALI_OFFER_ACTIVE = False` to
+  restore list prices. `payment.amount_paise` charges the offer price; `verify_payment` now rejects an order
+  whose Razorpay `amount` != `amount_paise(plan)`. `GET /billing/plans` returns `price_inr` (list) plus
+  `offer_price_inr`/`offer_pct`/`offer_label`. `subscriptions.amount_paid_inr`/`discount_pct` (migration
+  0016, must be run manually; `assign_plan` degrades without it) record what was paid; referral commission
+  (`credit_referral(amount_paid_inr=...)`) and `/admin/purchases` revenue use the paid amount, falling back
+  to list price for admin grants/legacy rows. Frontend mirror: `src/data/plans.jsx` (`withOffer`,
+  `offerAmount`) — keep in sync with the backend constants.
 - Amount is derived server-side from `PLAN_SPECS` — never trust the client.
 - `PAYMENT_AMOUNT_DIVISOR=100` → ₹14.99 charged as ₹0.15 for QA.
 - Replay protection: payment_id tracked to prevent duplicate plan grants.

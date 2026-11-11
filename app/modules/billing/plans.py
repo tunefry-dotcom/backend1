@@ -201,6 +201,27 @@ def get_spec(plan: Plan) -> PlanSpec:
     return PLAN_SPECS[plan]
 
 
+# --- Diwali offer -------------------------------------------------------------
+# Single switch for the site-wide launch discount. Flip DIWALI_OFFER_ACTIVE to
+# False (or later make it env/date-driven) to restore list prices everywhere:
+# the Razorpay amount, /billing/plans, referral commission all derive from here.
+DIWALI_OFFER_ACTIVE = True
+DIWALI_OFFER_PCT = 10
+DIWALI_OFFER_LABEL = "Diwali Offer"
+
+
+def offer_pct(plan: Plan) -> int:
+    """Discount % that applies to ``plan`` right now (0 for Free / offer off)."""
+    if not DIWALI_OFFER_ACTIVE or PLAN_SPECS[plan].price_inr <= 0:
+        return 0
+    return DIWALI_OFFER_PCT
+
+
+def offer_price_inr(plan: Plan) -> int:
+    """Price in whole rupees after the offer (== list price when none applies)."""
+    return (PLAN_SPECS[plan].price_inr * (100 - offer_pct(plan))) // 100
+
+
 def has_feature(plan: Plan, feature: Feature) -> bool:
     return feature in PLAN_SPECS[plan].features
 

@@ -108,6 +108,8 @@ def assign_plan(
     plan: Plan,
     *,
     payment_ref: Optional[str] = None,
+    amount_paid_inr: Optional[int] = None,
+    discount_pct: Optional[int] = None,
 ) -> dict[str, Any]:
     """Upsert the user's subscription to ``plan`` and return the stored row.
 
@@ -125,13 +127,20 @@ def assign_plan(
         "payment_ref": payment_ref,
         "plan_confirmed": True,
     }
+    # Only written for real payments (migration 0016). Free/admin grants leave the
+    # columns untouched so they never clobber a previous purchase record needlessly.
+    if amount_paid_inr is not None:
+        record["amount_paid_inr"] = amount_paid_inr
+        record["discount_pct"] = discount_pct or 0
 
     service = get_service_client()
     try:
         res = service.table(_TABLE).upsert(record, on_conflict="user_id").execute()
     except Exception:
-        # plan_confirmed column may not exist yet (migration pending); retry without it
-        record_fb = {k: v for k, v in record.items() if k != "plan_confirmed"}
+        # plan_confirmed / amount columns may not exist yet (migration pending);
+        # retry without them so a paid plan is never lost over bookkeeping columns.
+        _optional = {"plan_confirmed", "amount_paid_inr", "discount_pct"}
+        record_fb = {k: v for k, v in record.items() if k not in _optional}
         res = service.table(_TABLE).upsert(record_fb, on_conflict="user_id").execute()
     rows = res.data or []
     return rows[0] if rows else record

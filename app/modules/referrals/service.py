@@ -120,8 +120,11 @@ def credit_referral(
     plan: Plan,
     source: str,
     payment_ref: Optional[str] = None,
+    amount_paid_inr: Optional[int] = None,
 ) -> None:
-    """Credit 10% of ``plan``'s price to the referrer's wallet, if any.
+    """Credit 10% of what the buyer paid (``amount_paid_inr``) to the referrer.
+
+    Falls back to ``plan``'s list price when no paid amount is supplied (admin grants).
 
     No-op when the referred user wasn't referred, or when the plan is free
     (amount would be zero). Best-effort — a failure here must never break the
@@ -133,7 +136,8 @@ def credit_referral(
         if not row:
             return
 
-        amount = get_spec(plan).price_inr * _COMMISSION_PCT
+        base = amount_paid_inr if amount_paid_inr is not None else get_spec(plan).price_inr
+        amount = base * _COMMISSION_PCT
         if amount <= 0:
             return
 

@@ -1032,6 +1032,11 @@ async def list_purchases() -> dict:
             continue
         plan_name = _PLAN_NAMES.get(plan_key, plan_key.replace("-", " ").replace("_", " ").title())
         plan_price = _PLAN_PRICES_INR.get(plan_key, 0)
+        # Prefer what the buyer actually paid (Diwali offer etc.); legacy/admin-granted
+        # rows have no amount_paid_inr and keep using the list price.
+        paid = sub.get("amount_paid_inr")
+        if paid is not None:
+            plan_price = int(float(paid))
 
         if sub.get("status") == "active":
             plan_counts[plan_key] = plan_counts.get(plan_key, 0) + 1

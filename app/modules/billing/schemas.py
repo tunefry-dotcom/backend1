@@ -14,7 +14,10 @@ class PlanSummary(BaseModel):
 
     id: Plan
     name: str
-    price_inr: int
+    price_inr: int  # list price
+    offer_price_inr: int  # price actually charged (== price_inr when no offer)
+    offer_pct: int = 0  # 0 => no offer on this plan
+    offer_label: Optional[str] = None
     royalty_pct: int
     max_releases: Optional[int]  # None => unlimited
     max_artists: Optional[int]  # None => unlimited
@@ -56,6 +59,8 @@ class OrderResponse(BaseModel):
     key_id: str          # public Razorpay key for the checkout widget
     plan: Plan
     plan_name: str
+    list_price_inr: Optional[int] = None
+    offer_pct: int = 0
 
 
 class VerifyPaymentRequest(BaseModel):

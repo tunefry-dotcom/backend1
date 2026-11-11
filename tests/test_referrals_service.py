@@ -91,6 +91,18 @@ class CreditReferralTests(unittest.TestCase):
         self.assertEqual(inserted["payment_ref"], "pay_123")
         mock_recompute.assert_called_once_with("referrer@example.com")
 
+    def test_commission_is_ten_percent_of_amount_actually_paid(self):
+        client = self._client_with_referral("referrer-1", "referrer@example.com")
+        with patch.object(referrals_service, "get_service_client", return_value=client), \
+             patch.object(referrals_service, "recompute_balance"):
+            referrals_service.credit_referral(
+                referred_user_id="u1", plan=Plan.SINGLE_ARTIST, source="payment",
+                payment_ref="pay_123", amount_paid_inr=1439,
+            )
+        # Diwali price ₹1439 -> 10% = ₹143.90 (not 10% of the ₹1599 list price)
+        inserted = client.table("referral_earnings").last_insert
+        self.assertEqual(Decimal(inserted["amount"]), Decimal("143.90"))
+
     def test_recompute_failure_is_logged_loudly_but_does_not_raise(self):
         """The referral_earnings insert must not be undone/hidden by a
         recompute failure — and the failure must be distinguishable from
